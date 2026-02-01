@@ -228,11 +228,20 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .IsConcurrencyToken()
                         .HasColumnType("text");
 
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DeletedBy")
+                        .HasColumnType("text");
+
                     b.Property<string>("Email")
                         .HasMaxLength(256)
                         .HasColumnType("character varying(256)");
 
                     b.Property<bool>("EmailConfirmed")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsDeleted")
                         .HasColumnType("boolean");
 
                     b.Property<bool>("IsSystemAdmin")
@@ -427,6 +436,57 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("Ausencias");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.CustomTenantRole", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("Color")
+                        .HasMaxLength(7)
+                        .HasColumnType("character varying(7)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("DisplayOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("IsSystem")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "IsSystem")
+                        .HasDatabaseName("IX_CustomTenantRole_TenantId_IsSystem");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique()
+                        .HasDatabaseName("IX_CustomTenantRole_TenantId_Name");
+
+                    b.ToTable("CustomTenantRoles");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.DeduccionFija", b =>
                 {
                     b.Property<int>("Id")
@@ -604,6 +664,10 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
 
                     b.Property<int>("TenantId")
                         .HasColumnType("integer");
+
+                    b.Property<string>("UserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
 
                     b.Property<int>("YearsCotized")
                         .HasColumnType("integer");
@@ -1332,6 +1396,48 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("RefreshTokens");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.RolePermission", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("CustomTenantRoleId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("GrantedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Permission")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .HasDatabaseName("IX_RolePermission_TenantId");
+
+                    b.HasIndex("CustomTenantRoleId", "Permission")
+                        .HasDatabaseName("IX_RolePermission_RoleId_Permission");
+
+                    b.ToTable("RolePermissions");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.SaldoVacaciones", b =>
                 {
                     b.Property<int>("Id")
@@ -1792,6 +1898,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int?>("CustomTenantRoleId")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("InvitationExpiresAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1830,6 +1939,8 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasColumnType("character varying(450)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CustomTenantRoleId");
 
                     b.HasIndex("InvitationToken")
                         .HasDatabaseName("IX_TenantUser_InvitationToken");
@@ -1939,6 +2050,17 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("Empleado");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.CustomTenantRole", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });
@@ -2168,6 +2290,25 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Navigation("User");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.RolePermission", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.CustomTenantRole", "Role")
+                        .WithMany("Permissions")
+                        .HasForeignKey("CustomTenantRoleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Role");
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.SaldoVacaciones", b =>
                 {
                     b.HasOne("Vorluno.Planilla.Domain.Entities.Empleado", "Empleado")
@@ -2259,6 +2400,11 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.TenantUser", b =>
                 {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.CustomTenantRole", "CustomRole")
+                        .WithMany("Users")
+                        .HasForeignKey("CustomTenantRoleId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
                         .WithMany("Users")
                         .HasForeignKey("TenantId")
@@ -2271,9 +2417,18 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.Navigation("CustomRole");
+
                     b.Navigation("Tenant");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.CustomTenantRole", b =>
+                {
+                    b.Navigation("Permissions");
+
+                    b.Navigation("Users");
                 });
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.Departamento", b =>
