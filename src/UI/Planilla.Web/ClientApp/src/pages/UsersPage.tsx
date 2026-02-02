@@ -5,12 +5,21 @@ import type { TenantUserDto, InvitationDto, TenantRole, UpdateTenantUserDto } fr
 import toast from 'react-hot-toast';
 import ConfirmModal from '../components/ConfirmModal';
 
+interface CustomRole {
+  id: number;
+  name: string;
+  description: string;
+  permissions: string[];
+}
+
 export default function UsersPage() {
   const { subscription } = useAuth();
   const [users, setUsers] = useState<TenantUserDto[]>([]);
   const [invitations, setInvitations] = useState<InvitationDto[]>([]);
   const [usage, setUsage] = useState<{ usersCount: number; maxUsers: number } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
+  const [isLoadingRoles, setIsLoadingRoles] = useState(false);
 
   // Invite modal state
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
@@ -41,6 +50,7 @@ export default function UsersPage() {
 
   useEffect(() => {
     loadData();
+    loadCustomRoles();
   }, []);
 
   const loadData = async () => {
@@ -60,6 +70,22 @@ export default function UsersPage() {
       console.error(error);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadCustomRoles = async () => {
+    try {
+      setIsLoadingRoles(true);
+      const response = await fetch('/api/tenants/roles');
+      if (!response.ok) throw new Error('Error al cargar roles');
+      const data = await response.json();
+      setCustomRoles(data || []);
+    } catch (error: any) {
+      console.error('Error loading custom roles:', error);
+      // Si falla la carga de roles custom, usar roles predeterminados
+      setCustomRoles([]);
+    } finally {
+      setIsLoadingRoles(false);
     }
   };
 
@@ -506,22 +532,36 @@ export default function UsersPage() {
 
                   <div>
                     <label htmlFor="role" className="block text-sm font-medium text-gray-700 mb-2">
-                      Rol
+                      Rol {customRoles.length > 0 && <span className="text-blue-600">(Personalizado)</span>}
                     </label>
                     <select
                       id="role"
                       value={inviteRole}
                       onChange={(e) => setInviteRole(Number(e.target.value) as TenantRole)}
                       className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                      disabled={isInviting}
+                      disabled={isInviting || isLoadingRoles}
                     >
-                      <option value={1}>Admin</option>
-                      <option value={2}>Manager</option>
-                      <option value={3}>Accountant</option>
-                      <option value={4}>Employee</option>
+                      {customRoles.length > 0 ? (
+                        <>
+                          {customRoles.map((role) => (
+                            <option key={role.id} value={role.id}>
+                              {role.name}
+                            </option>
+                          ))}
+                        </>
+                      ) : (
+                        <>
+                          <option value={1}>Admin</option>
+                          <option value={2}>Manager</option>
+                          <option value={3}>Accountant</option>
+                          <option value={4}>Employee</option>
+                        </>
+                      )}
                     </select>
                     <p className="mt-2 text-xs text-gray-500">
-                      {getRoleDescription(inviteRole)}
+                      {customRoles.length > 0
+                        ? customRoles.find((r) => r.id === inviteRole)?.description || ''
+                        : getRoleDescription(inviteRole)}
                     </p>
                   </div>
 
@@ -653,22 +693,36 @@ export default function UsersPage() {
 
               <div>
                 <label htmlFor="newRole" className="block text-sm font-medium text-gray-700 mb-2">
-                  Nuevo Rol
+                  Nuevo Rol {customRoles.length > 0 && <span className="text-blue-600">(Personalizado)</span>}
                 </label>
                 <select
                   id="newRole"
                   value={newRole}
                   onChange={(e) => setNewRole(Number(e.target.value) as TenantRole)}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  disabled={isUpdatingRole}
+                  disabled={isUpdatingRole || isLoadingRoles}
                 >
-                  <option value={1}>Admin</option>
-                  <option value={2}>Manager</option>
-                  <option value={3}>Accountant</option>
-                  <option value={4}>Employee</option>
+                  {customRoles.length > 0 ? (
+                    <>
+                      {customRoles.map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.name}
+                        </option>
+                      ))}
+                    </>
+                  ) : (
+                    <>
+                      <option value={1}>Admin</option>
+                      <option value={2}>Manager</option>
+                      <option value={3}>Accountant</option>
+                      <option value={4}>Employee</option>
+                    </>
+                  )}
                 </select>
                 <p className="mt-2 text-xs text-gray-500">
-                  {getRoleDescription(newRole)}
+                  {customRoles.length > 0
+                    ? customRoles.find((r) => r.id === newRole)?.description || ''
+                    : getRoleDescription(newRole)}
                 </p>
               </div>
 

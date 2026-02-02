@@ -276,6 +276,10 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<string>("SecurityStamp")
                         .HasColumnType("text");
 
+                    b.Property<string>("Telefono")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
                     b.Property<bool>("TwoFactorEnabled")
                         .HasColumnType("boolean");
 
@@ -620,17 +624,31 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<decimal>("CssRiskPercentage")
                         .HasColumnType("decimal(5, 2)");
 
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DeletedBy")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
                     b.Property<int?>("DepartamentoId")
                         .HasColumnType("integer");
 
                     b.Property<int>("Dependents")
                         .HasColumnType("integer");
 
+                    b.Property<string>("Email")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<bool>("EstaActivo")
                         .HasColumnType("boolean");
 
                     b.Property<DateTime>("FechaContratacion")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("boolean");
 
                     b.Property<bool>("IsSubjectToCss")
                         .HasColumnType("boolean");
@@ -684,6 +702,8 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
 
                     b.HasIndex("TenantId")
                         .HasDatabaseName("IX_Empleado_TenantId");
+
+                    b.HasIndex("UserId");
 
                     b.HasIndex("TenantId", "DepartamentoId")
                         .HasDatabaseName("IX_Empleado_TenantId_DepartamentoId");
@@ -1783,10 +1803,18 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("LogoUrl")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Pais")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
 
                     b.Property<string>("Phone")
                         .HasMaxLength(20)
@@ -1799,6 +1827,10 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<string>("Settings")
                         .HasColumnType("text");
 
+                    b.Property<string>("SitioWeb")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
                     b.Property<string>("Subdomain")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -1806,6 +1838,11 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
 
                     b.Property<int?>("SubscriptionId")
                         .HasColumnType("integer");
+
+                    b.Property<string>("TipoContribuyente")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -2120,11 +2157,17 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.AppUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId");
+
                     b.Navigation("Departamento");
 
                     b.Navigation("Posicion");
 
                     b.Navigation("Tenant");
+
+                    b.Navigation("User");
                 });
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.HoraExtra", b =>
