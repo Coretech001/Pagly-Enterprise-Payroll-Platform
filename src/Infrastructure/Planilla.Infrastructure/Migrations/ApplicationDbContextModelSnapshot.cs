@@ -1195,7 +1195,7 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("DepartamentoId")
+                    b.Property<int?>("DepartamentoId")
                         .HasColumnType("integer");
 
                     b.Property<string>("Descripcion")
@@ -2262,8 +2262,7 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.HasOne("Vorluno.Planilla.Domain.Entities.Departamento", "Departamento")
                         .WithMany("Posiciones")
                         .HasForeignKey("DepartamentoId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
                         .WithMany()
