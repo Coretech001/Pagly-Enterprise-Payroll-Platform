@@ -378,6 +378,50 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("ApiKeys");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.ApiUsageRecord", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int?>("ApiKeyId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Method")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)");
+
+                    b.Property<int>("ResponseTimeMs")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("StatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApiKeyId", "CreatedAt")
+                        .HasDatabaseName("IX_ApiUsageRecord_ApiKeyId_CreatedAt");
+
+                    b.HasIndex("TenantId", "CreatedAt")
+                        .HasDatabaseName("IX_ApiUsageRecord_TenantId_CreatedAt");
+
+                    b.ToTable("ApiUsageRecords");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.AppUser", b =>
                 {
                     b.Property<string>("Id")
@@ -2926,6 +2970,16 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.ApiUsageRecord", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.ApiKey", "ApiKey")
+                        .WithMany()
+                        .HasForeignKey("ApiKeyId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("ApiKey");
                 });
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.AuditLogEntry", b =>
