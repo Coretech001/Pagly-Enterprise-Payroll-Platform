@@ -1234,6 +1234,57 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("HorasExtra");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.IdempotencyRecord", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("ApiKeyId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Endpoint")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("IdempotencyKey")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ResponseJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("StatusCode")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("IX_IdempotencyRecord_ExpiresAt");
+
+                    b.HasIndex("ApiKeyId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("IX_IdempotencyRecord_ApiKey_Key_Unique");
+
+                    b.ToTable("IdempotencyRecords");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.Liquidacion", b =>
                 {
                     b.Property<int>("Id")
@@ -2140,6 +2191,44 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasDatabaseName("IX_Prestamo_EmpleadoId_Estado");
 
                     b.ToTable("Prestamos");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.QuotaAlertSent", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("LimitAtAlert")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PeriodMonth")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("PeriodYear")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RequestsAtAlert")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("SentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Threshold")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "PeriodYear", "PeriodMonth", "Threshold")
+                        .IsUnique()
+                        .HasDatabaseName("IX_QuotaAlertSent_TenantMonthThreshold_Unique");
+
+                    b.ToTable("QuotaAlertsSent");
                 });
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.ReciboDeSueldo", b =>
@@ -3182,6 +3271,17 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Navigation("Empleado");
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.IdempotencyRecord", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.ApiKey", "ApiKey")
+                        .WithMany()
+                        .HasForeignKey("ApiKeyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ApiKey");
                 });
 
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.Liquidacion", b =>
