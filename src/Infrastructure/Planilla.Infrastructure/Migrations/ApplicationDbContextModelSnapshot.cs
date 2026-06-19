@@ -1304,6 +1304,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<DateTime?>("ApprovedDate")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<decimal>("Cesantia")
+                        .HasColumnType("decimal(18,2)");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1353,6 +1356,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
 
+                    b.Property<decimal>("IndemnizacionSemanas")
+                        .HasColumnType("decimal(8,2)");
+
                     b.Property<decimal>("Isr")
                         .HasPrecision(18, 2)
                         .HasColumnType("decimal(18,2)");
@@ -1368,6 +1374,12 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
 
                     b.Property<decimal>("Preaviso")
                         .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("PrimaAntiguedad")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("RecargoArt219")
                         .HasColumnType("decimal(18,2)");
 
                     b.Property<decimal>("SalarioBase")
