@@ -1121,6 +1121,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<int>("TenantId")
                         .HasColumnType("integer");
 
+                    b.Property<int>("TipoContrato")
+                        .HasColumnType("integer");
+
                     b.Property<string>("UserId")
                         .HasMaxLength(450)
                         .HasColumnType("character varying(450)");
