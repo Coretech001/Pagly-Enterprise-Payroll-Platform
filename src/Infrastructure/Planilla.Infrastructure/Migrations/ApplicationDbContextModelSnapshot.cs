@@ -1484,6 +1484,53 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("Liquidaciones");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.OvertimeFactorConfiguration", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("EsFactorExceso")
+                        .HasColumnType("boolean");
+
+                    b.Property<decimal>("Factor")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("decimal(6, 4)");
+
+                    b.Property<decimal?>("FactorExceso")
+                        .HasPrecision(6, 4)
+                        .HasColumnType("decimal(6, 4)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Tipo")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedByUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Tipo")
+                        .IsUnique()
+                        .HasDatabaseName("IX_OvertimeFactorConfiguration_TenantId_Tipo");
+
+                    b.ToTable("OvertimeFactorConfigurations");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.PagoPrestamo", b =>
                 {
                     b.Property<int>("Id")
@@ -3362,6 +3409,17 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .IsRequired();
 
                     b.Navigation("Empleado");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.OvertimeFactorConfiguration", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });
