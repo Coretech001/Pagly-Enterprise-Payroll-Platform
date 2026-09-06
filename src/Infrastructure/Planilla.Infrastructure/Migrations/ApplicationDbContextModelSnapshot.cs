@@ -244,6 +244,79 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("Acreedores");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.AcumuladoFiscalEmpleado", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("Anio")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("DecimoInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("DecimoProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<int>("EmpleadoId")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("GastoRepresentacionInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("GastoRepresentacionProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IngresoGravableInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IngresoGravableProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrDecimoProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacionInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacionProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrRegularProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrRetenidoInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<int>("PeriodosProcesados")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("SaldoFavorEmpleado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EmpleadoId");
+
+                    b.HasIndex("TenantId", "EmpleadoId", "Anio")
+                        .IsUnique()
+                        .HasDatabaseName("IX_AcumuladoFiscalEmpleado_Tenant_Empleado_Anio");
+
+                    b.ToTable("AcumuladosFiscalesEmpleados");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.Anticipo", b =>
                 {
                     b.Property<int>("Id")
@@ -1071,6 +1144,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<DateTime>("FechaContratacion")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<decimal>("GastoRepresentacionMensual")
+                        .HasColumnType("decimal(18, 2)");
+
                     b.Property<decimal>("HourlyRate")
                         .HasPrecision(18, 4)
                         .HasColumnType("decimal(18, 4)");
@@ -1653,6 +1729,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<decimal>("GastoRepresentacion")
+                        .HasColumnType("numeric");
+
                     b.Property<decimal>("GrossPay")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
@@ -1675,6 +1754,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<decimal>("IncomeTax")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacion")
+                        .HasColumnType("numeric");
 
                     b.Property<decimal>("MontoDescuentoAusencias")
                         .HasPrecision(18, 2)
@@ -3126,6 +3208,25 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.AcumuladoFiscalEmpleado", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Empleado", "Empleado")
+                        .WithMany()
+                        .HasForeignKey("EmpleadoId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Empleado");
 
                     b.Navigation("Tenant");
                 });
