@@ -267,6 +267,12 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<int>("EmpleadoId")
                         .HasColumnType("integer");
 
+                    b.Property<decimal>("GastoRepresentacionInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("GastoRepresentacionProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
                     b.Property<decimal>("IngresoGravableInicial")
                         .HasColumnType("decimal(18, 2)");
 
@@ -274,6 +280,12 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasColumnType("decimal(18, 2)");
 
                     b.Property<decimal>("IsrDecimoProcesado")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacionInicial")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacionProcesado")
                         .HasColumnType("decimal(18, 2)");
 
                     b.Property<decimal>("IsrRegularProcesado")
@@ -1132,6 +1144,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<DateTime>("FechaContratacion")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<decimal>("GastoRepresentacionMensual")
+                        .HasColumnType("decimal(18, 2)");
+
                     b.Property<decimal>("HourlyRate")
                         .HasPrecision(18, 4)
                         .HasColumnType("decimal(18, 4)");
@@ -1714,6 +1729,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<decimal>("GastoRepresentacion")
+                        .HasColumnType("numeric");
+
                     b.Property<decimal>("GrossPay")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
@@ -1736,6 +1754,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<decimal>("IncomeTax")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
+
+                    b.Property<decimal>("IsrGastoRepresentacion")
+                        .HasColumnType("numeric");
 
                     b.Property<decimal>("MontoDescuentoAusencias")
                         .HasPrecision(18, 2)
