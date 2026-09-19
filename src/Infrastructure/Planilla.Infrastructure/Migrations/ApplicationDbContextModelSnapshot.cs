@@ -294,6 +294,9 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Property<decimal>("IsrRetenidoInicial")
                         .HasColumnType("decimal(18, 2)");
 
+                    b.Property<int>("PartidasDecimoInicial")
+                        .HasColumnType("integer");
+
                     b.Property<int>("PeriodosProcesados")
                         .HasColumnType("integer");
 
