@@ -1105,6 +1105,62 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.ToTable("DetallesDecimo");
                 });
 
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.DevengadoMensual", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("Anio")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Comision")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("EmpleadoId")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Extras")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<int>("Mes")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Nota")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<int>("Origen")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("Salario")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.Property<int>("TenantId")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<decimal>("Vacaciones")
+                        .HasColumnType("decimal(18, 2)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("EmpleadoId");
+
+                    b.HasIndex("TenantId", "EmpleadoId", "Anio", "Mes")
+                        .IsUnique()
+                        .HasDatabaseName("IX_DevengadoMensual_Tenant_Empleado_Anio_Mes");
+
+                    b.ToTable("DevengadosMensuales");
+                });
+
             modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.Empleado", b =>
                 {
                     b.Property<int>("Id")
@@ -3422,6 +3478,25 @@ namespace Vorluno.Planilla.Infrastructure.Migrations
                     b.Navigation("Empleado");
 
                     b.Navigation("PlanillaDecimo");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("Vorluno.Planilla.Domain.Entities.DevengadoMensual", b =>
+                {
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Empleado", "Empleado")
+                        .WithMany()
+                        .HasForeignKey("EmpleadoId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Vorluno.Planilla.Domain.Entities.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Empleado");
 
                     b.Navigation("Tenant");
                 });
