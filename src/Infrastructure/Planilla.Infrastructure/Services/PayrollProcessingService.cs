@@ -174,6 +174,12 @@ public class PayrollProcessingService
                                  + montoHorasExtra - descuentoAusencias + comisiones;
         decimal isrGastoRepresentacion = 0m;
 
+        // Parte VARIABLE del bruto para el ISR: horas extra y comisiones no se proyectan al año
+        // — se gravan por impuesto marginal en el período en que se pagan. El salario fijo, sí.
+        decimal variablePay = montoHorasExtra + comisiones;
+        decimal? remainingPeriods = PayrollConstants.GetRemainingPeriodsInYear(
+            empleado.FechaContratacion, payrollPeriodStart, empleado.PayFrequency);
+
         // ====================================================================
         // PASO 3: Calcular deducciones legales (CSS, SE, ISR)
         // ====================================================================
@@ -202,7 +208,9 @@ public class PayrollProcessingService
                 empleado.IsSubjectToCss,
                 empleado.IsSubjectToEducationalInsurance,
                 empleado.IsSubjectToIncomeTax,
-                payrollPeriodStart
+                payrollPeriodStart,
+                variablePay: variablePay,
+                remainingPeriodsInYear: remainingPeriods
             );
 
             // El ISR del orquestador es una proyección del período suelto; el que
@@ -394,6 +402,19 @@ public class PayrollProcessingService
             grossPay = hours.TotalHoursPay + hours.Commissions;
         }
 
+        // Parte VARIABLE del bruto para el ISR. El salario fijo es la jornada regular menos
+        // ausencias; todo lo demás —recargos de domingo y feriado, horas extra y comisiones—
+        // es variable y no debe proyectarse al año.
+        decimal variablePayIsr = 0m;
+        if (hours != null)
+        {
+            variablePayIsr = hours.SundayPay + hours.HolidayPay
+                + hours.OvertimeDayPay + hours.OvertimeNightPay + hours.OvertimeHolidayPay
+                + hours.OvertimeMixedPay + hours.OvertimeExcessPay + hours.Commissions;
+        }
+        decimal? remainingPeriodsIsr = PayrollConstants.GetRemainingPeriodsInYear(
+            employee.FechaContratacion, payrollHeader.PeriodStartDate, payrollHeader.PayPeriodType.ToString());
+=======
         // El gasto de representación entra al bruto: para la Caja de Seguro Social
         // es salario. La renta lo separa después, con su propia tarifa.
         decimal gastoRepresentacion = fraccionSalario >= 1m
@@ -430,7 +451,9 @@ public class PayrollProcessingService
                 isSubjectToCss: employee.IsSubjectToCss,
                 isSubjectToEducationalInsurance: employee.IsSubjectToEducationalInsurance,
                 isSubjectToIncomeTax: employee.IsSubjectToIncomeTax,
-                calculationDate: DateTime.UtcNow
+                calculationDate: DateTime.UtcNow,
+                variablePay: variablePayIsr,
+                remainingPeriodsInYear: remainingPeriodsIsr
             );
 
             (calculationResult, isrGastoRepresentacion) = await AplicarIsrAcumulativoAsync(

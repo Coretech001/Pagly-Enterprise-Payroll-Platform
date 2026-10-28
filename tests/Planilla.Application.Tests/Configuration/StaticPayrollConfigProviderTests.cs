@@ -261,6 +261,16 @@ public class StaticPayrollConfigProviderTests
         // Assert — sin deducciones: la base del ISR es el ingreso gravable completo.
         // annual = 2,000 * 13 = 26,000; no se deduce ni Seguro Educativo ni CSS.
         // Bracket 2: MinIncome = 11,000.01, Rate = 15%, FixedAmount = 0
+        // Excedente = 25,675 - 11,000.01 = 14,674.99
+        // AnnualTax = 14,674.99 * 0.15 ≈ 2,201.25
+        // PeriodTax = 2,201.25 / 13 periodos equivalentes ≈ 169.33
+        // (mensual: 12 x 13/12 = 13; el tercio del decimo lo retiene el modulo de decimo)
+        result.TaxableIncome.Should().Be(26000m);
+        result.DependentDeduction.Should().Be(0m);
+        result.SeDeduction.Should().Be(325m);
+        result.NetTaxableIncome.Should().Be(25675m);
+        result.TaxAmount.Should().BeApproximately(169.33m, 0.02m);
+=======
         // Excedente = 26,000 - 11,000.01 = 14,999.99
         // AnnualTax = 14,999.99 * 0.15 = 2,250.00 → PeriodTax = 2,250 / 12 = 187.50
         result.SeDeduction.Should().Be(0m);

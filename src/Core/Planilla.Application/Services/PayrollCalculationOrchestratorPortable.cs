@@ -45,6 +45,16 @@ public class PayrollCalculationOrchestratorPortable
     /// <param name="isSubjectToEducationalInsurance">Indica si el empleado está sujeto a Seguro Educativo</param>
     /// <param name="isSubjectToIncomeTax">Indica si el empleado está sujeto a ISR</param>
     /// <param name="calculationDate">Fecha de cálculo (para determinar configuración vigente)</param>
+    /// <param name="variablePay">
+    /// Parte variable del bruto (horas extra, recargos, comisiones). No se proyecta al año:
+    /// se grava por impuesto marginal en el período en que se paga.
+    /// </param>
+    /// <param name="remainingPeriodsInYear">
+    /// Períodos que el empleado trabajará en lo que resta del año fiscal. Para quien ingresa
+    /// a mitad de año, evita anualizar su salario como si lo hubiera cobrado desde enero.
+    /// </param>
+    /// <param name="earnedSoFarThisYear">Lo realmente devengado en el año antes de este período.</param>
+=======
     /// <param name="incomeTaxOverride">
     /// ISR ya calculado por el motor acumulativo. Cuando viene, se usa tal cual y no se
     /// recalcula: el método acumulativo necesita el acumulado del año del empleado, que
@@ -64,6 +74,9 @@ public class PayrollCalculationOrchestratorPortable
         bool isSubjectToEducationalInsurance,
         bool isSubjectToIncomeTax,
         DateTime calculationDate,
+        decimal? variablePay = null,
+        decimal? remainingPeriodsInYear = null,
+        decimal earnedSoFarThisYear = 0m)
         decimal? incomeTaxOverride = null)
     {
         // ====================================================================
@@ -102,6 +115,19 @@ public class PayrollCalculationOrchestratorPortable
         // 3. Calcular Impuesto Sobre la Renta (ISR)
         // Proyección anual con brackets progresivos
         // ====================================================================
+        var isrResult = await _incomeTaxService.CalculateIncomeTaxAsync(
+            companyId,
+            grossPay,
+            payFrequency,
+            dependents,
+            isSubjectToIncomeTax,
+            isSubjectToEducationalInsurance,
+            calculationDate,
+            variablePay,
+            remainingPeriodsInYear,
+            earnedSoFarThisYear
+        );
+=======
         decimal incomeTax;
         if (incomeTaxOverride.HasValue)
         {
