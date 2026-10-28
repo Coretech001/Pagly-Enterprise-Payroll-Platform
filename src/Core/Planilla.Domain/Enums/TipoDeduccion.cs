@@ -1,4 +1,4 @@
-namespace Planilla.Domain.Enums;
+namespace Vorluno.Planilla.Domain.Enums;
 
 /// <summary>
 /// Tipos de deducciones que se pueden aplicar a un empleado.
@@ -39,6 +39,11 @@ public enum TipoDeduccion
     /// Cuota sindical
     /// </summary>
     Sindicato = 7,
+
+    /// <summary>
+    /// Descuentos de cooperativas (Ley 17 de 1997)
+    /// </summary>
+    Cooperativa = 8,
 
     /// <summary>
     /// Otro tipo de deducción no clasificada

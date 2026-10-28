@@ -1,11 +1,12 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa un préstamo otorgado a un empleado que se descuenta en cuotas.
 /// </summary>
-public class Prestamo
+public class Prestamo : ITenantEntity
 {
     public int Id { get; set; }
 
@@ -16,9 +17,9 @@ public class Prestamo
     public Empleado Empleado { get; set; } = null!;
 
     /// <summary>
-    /// ID de la compañía (multi-tenancy)
+    /// ID del tenant al que pertenece este préstamo
     /// </summary>
-    public int CompanyId { get; set; }
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Descripción del préstamo (ej: "Préstamo personal", "Adelanto vacaciones")
@@ -39,6 +40,12 @@ public class Prestamo
     /// Monto de cada cuota mensual a descontar
     /// </summary>
     public decimal CuotaMensual { get; set; }
+
+    /// <summary>
+    /// Frecuencia de la cuota del préstamo (Mensual, Quincenal, etc.).
+    /// Determina cómo se prorratea la cuota al descontar en planilla.
+    /// </summary>
+    public PayPeriodType FrecuenciaCuota { get; set; } = PayPeriodType.Mensual;
 
     /// <summary>
     /// Tasa de interés anual (en porcentaje, ej: 5.0 = 5%)
@@ -80,6 +87,14 @@ public class Prestamo
     /// </summary>
     public string? Observaciones { get; set; }
 
+    // ====================================================================
+    // Referencia al Catálogo de Acreedores (opcional)
+    // ====================================================================
+
+    /// <summary>FK al catálogo de acreedores (útil para préstamos bancarios)</summary>
+    public int? AcreedorId { get; set; }
+    public virtual Acreedor? Acreedor { get; set; }
+
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
@@ -87,4 +102,5 @@ public class Prestamo
 
     // Navegación
     public ICollection<PagoPrestamo> PagosPrestamo { get; set; } = new List<PagoPrestamo>();
+    public virtual Tenant? Tenant { get; set; }
 }

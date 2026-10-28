@@ -1,16 +1,58 @@
 import React, { useState, useEffect } from 'react';
-import { useToast } from '../components/ToastContext';
+import { createPortal } from 'react-dom';
+import toast from 'react-hot-toast';
+import { api } from '../services/api';
+import { formatCurrency } from '../utils/currency';
+import { formatDate } from '../utils/date';
+
+const MESES = [
+    { value: 1, label: 'Enero' },
+    { value: 2, label: 'Febrero' },
+    { value: 3, label: 'Marzo' },
+    { value: 4, label: 'Abril' },
+    { value: 5, label: 'Mayo' },
+    { value: 6, label: 'Junio' },
+    { value: 7, label: 'Julio' },
+    { value: 8, label: 'Agosto' },
+    { value: 9, label: 'Septiembre' },
+    { value: 10, label: 'Octubre' },
+    { value: 11, label: 'Noviembre' },
+    { value: 12, label: 'Diciembre' },
+];
+
+const CURRENT_YEAR = new Date().getFullYear();
+const ANIOS = [CURRENT_YEAR - 1, CURRENT_YEAR, CURRENT_YEAR + 1];
 
 const ReportesPage = () => {
-    const { showToast } = useToast();
-
-    // State management
     const [planillas, setPlanillas] = useState([]);
-    const [selectedPlanilla, setSelectedPlanilla] = useState('');
+    const [loadingPlanillas, setLoadingPlanillas] = useState(true);
+
+    // Selectors independientes por reporte
+    const [selPlanillaRegular, setSelPlanillaRegular] = useState('');
+    // SIPE: mensual (planillas + décimo + liquidaciones del mes), no por planilla.
+    const [sipMes, setSipMes] = useState(new Date().getMonth() + 1);
+    const [sipAnio, setSipAnio] = useState(CURRENT_YEAR);
+    const [selAcreedores, setSelAcreedores] = useState('');
+    const [selComprobantes, setSelComprobantes] = useState('');
+    const [selMes, setSelMes] = useState(new Date().getMonth() + 1);
+    const [selAnio, setSelAnio] = useState(CURRENT_YEAR);
+
     const [loading, setLoading] = useState(false);
     const [modalOpen, setModalOpen] = useState(false);
     const [modalType, setModalType] = useState('');
+    const [modalTitle, setModalTitle] = useState('');
     const [reporteData, setReporteData] = useState(null);
+    const [expandedRows, setExpandedRows] = useState(new Set());
+    // Selecciones conocidas como vacías tras un "Ver": { tipo: selKey }
+    const [emptySelections, setEmptySelections] = useState({});
+
+    const toggleRow = (idx) => {
+        setExpandedRows(prev => {
+            const next = new Set(prev);
+            next.has(idx) ? next.delete(idx) : next.add(idx);
+            return next;
+        });
+    };
 
     useEffect(() => {
         fetchPlanillas();
@@ -18,339 +60,256 @@ const ReportesPage = () => {
 
     const fetchPlanillas = async () => {
         try {
-            const response = await fetch('/api/payrollheaders');
-            if (!response.ok) throw new Error('Error al cargar planillas');
-            const data = await response.json();
-            // Filtrar planillas calculadas, aprobadas o pagadas (status >= 1)
-            const planillasValidas = data.filter(p => p.status >= 1);
-            setPlanillas(planillasValidas);
+            setLoadingPlanillas(true);
+            const data = await api.get('/api/payrollheaders');
+            const validas = (data || []).filter(p => p.status >= 1);
+            setPlanillas(validas);
         } catch (error) {
-            showToast({ type: 'error', message: error.message });
+            toast.error(error.message || 'Error al cargar planillas');
+        } finally {
+            setLoadingPlanillas(false);
+        }
+    };
+
+    const formatHoras = (h) => (h || 0).toFixed(2) + 'h';
+
+    // ── Acciones ──────────────────────────────────────────────────────────
+
+    const verReporte = async (tipo, params = {}) => {
+        setLoading(true);
+        try {
+            let url = '';
+            let titulo = '';
+            if (tipo === 'planilla-regular') {
+                if (!selPlanillaRegular) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/planilla-regular/${selPlanillaRegular}`;
+                titulo = 'Planilla Regular';
+            } else if (tipo === 'sip') {
+                url = `/api/reportes/sipe?mes=${sipMes}&anio=${sipAnio}`;
+                titulo = `SIPE — ${MESES.find(m => m.value === sipMes)?.label} ${sipAnio}`;
+            } else if (tipo === 'acreedores') {
+                if (!selAcreedores) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/acreedores/${selAcreedores}`;
+                titulo = 'Reporte de Acreedores';
+            } else if (tipo === 'mensual') {
+                url = `/api/reportes/mensual?mes=${selMes}&anio=${selAnio}`;
+                titulo = `Reporte Mensual — ${MESES.find(m => m.value === selMes)?.label} ${selAnio}`;
+            }
+            const data = await api.get(url);
+            setReporteData(data);
+            setModalType(tipo);
+            setModalTitle(titulo);
+            setExpandedRows(new Set());
+            setModalOpen(true);
+            // Registrar si la selección actual está vacía para deshabilitar botones en las cards
+            const selKey = tipo === 'planilla-regular' ? selPlanillaRegular
+                : tipo === 'sip' ? `${sipMes}-${sipAnio}`
+                : tipo === 'acreedores' ? selAcreedores
+                : `${selMes}-${selAnio}`;
+            const dataEmpty = !((data.empleados?.length > 0) || (data.acreedores?.length > 0));
+            setEmptySelections(prev => ({ ...prev, [tipo]: dataEmpty ? selKey : null }));
+        } catch (error) {
+            toast.error(error.message || 'Error al obtener reporte');
+        } finally {
+            setLoading(false);
         }
     };
 
     const descargarExcel = async (tipo) => {
-        if (!selectedPlanilla) {
-            showToast({ type: 'warning', message: 'Seleccione una planilla primero' });
-            return;
-        }
         setLoading(true);
         try {
-            const response = await fetch(`/api/reportes/${tipo}/${selectedPlanilla}/excel`);
-            if (!response.ok) throw new Error('Error al generar reporte');
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Reporte_${tipo.toUpperCase()}_${selectedPlanilla}_${new Date().toISOString().slice(0,10)}.xlsx`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            window.URL.revokeObjectURL(url);
-            showToast({ type: 'success', message: 'Excel descargado correctamente' });
+            let url = '', filename = '';
+            const fecha = new Date().toISOString().slice(0, 10);
+            if (tipo === 'planilla-regular') {
+                if (!selPlanillaRegular) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/planilla-regular/${selPlanillaRegular}/excel`;
+                filename = `PlanillaRegular_${selPlanillaRegular}_${fecha}.xlsx`;
+            } else if (tipo === 'sip') {
+                url = `/api/reportes/sipe/excel?mes=${sipMes}&anio=${sipAnio}`;
+                filename = `SIPE_${sipAnio}-${String(sipMes).padStart(2, '0')}.xlsx`;
+            } else if (tipo === 'acreedores') {
+                if (!selAcreedores) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/acreedores/${selAcreedores}/excel`;
+                filename = `Acreedores_${selAcreedores}_${fecha}.xlsx`;
+            } else if (tipo === 'mensual') {
+                url = `/api/reportes/mensual/excel?mes=${selMes}&anio=${selAnio}`;
+                filename = `Mensual_${selMes}_${selAnio}_${fecha}.xlsx`;
+            }
+            await api.download(url, filename);
+            toast.success('Excel descargado correctamente');
         } catch (error) {
-            showToast({ type: 'error', message: error.message });
+            toast.error(error.message || 'Error al descargar Excel');
         } finally {
             setLoading(false);
         }
     };
 
     const descargarPdf = async (tipo) => {
-        if (!selectedPlanilla) {
-            showToast({ type: 'warning', message: 'Seleccione una planilla primero' });
-            return;
-        }
         setLoading(true);
         try {
-            const response = await fetch(`/api/reportes/${tipo}/${selectedPlanilla}/pdf`);
-            if (!response.ok) throw new Error('Error al generar reporte');
-            const blob = await response.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Reporte_${tipo.toUpperCase()}_${selectedPlanilla}_${new Date().toISOString().slice(0,10)}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            window.URL.revokeObjectURL(url);
-            showToast({ type: 'success', message: 'PDF descargado correctamente' });
+            let url = '', filename = '';
+            const fecha = new Date().toISOString().slice(0, 10);
+            if (tipo === 'planilla-regular') {
+                if (!selPlanillaRegular) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/planilla-regular/${selPlanillaRegular}/pdf`;
+                filename = `PlanillaRegular_${selPlanillaRegular}_${fecha}.pdf`;
+            } else if (tipo === 'sip') {
+                url = `/api/reportes/sipe/pdf?mes=${sipMes}&anio=${sipAnio}`;
+                filename = `SIPE_${sipAnio}-${String(sipMes).padStart(2, '0')}.pdf`;
+            } else if (tipo === 'acreedores') {
+                if (!selAcreedores) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/acreedores/${selAcreedores}/pdf`;
+                filename = `Acreedores_${selAcreedores}_${fecha}.pdf`;
+            } else if (tipo === 'comprobantes') {
+                if (!selComprobantes) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/comprobantes/${selComprobantes}/pdf`;
+                filename = `Comprobantes_${selComprobantes}_${fecha}.pdf`;
+            } else if (tipo === 'comprobantes-compacto') {
+                if (!selComprobantes) { toast('Seleccione una planilla', { icon: '⚠️' }); return; }
+                url = `/api/reportes/comprobantes/${selComprobantes}/pdf-compacto`;
+                filename = `Comprobantes_Banco_${selComprobantes}_${fecha}.pdf`;
+            } else if (tipo === 'mensual') {
+                url = `/api/reportes/mensual/pdf?mes=${selMes}&anio=${selAnio}`;
+                filename = `Mensual_${selMes}_${selAnio}_${fecha}.pdf`;
+            }
+            await api.download(url, filename);
+            toast.success('PDF descargado correctamente');
         } catch (error) {
-            showToast({ type: 'error', message: error.message });
+            toast.error(error.message || 'Error al descargar PDF');
         } finally {
             setLoading(false);
         }
     };
 
-    const verReporte = async (tipo) => {
-        if (!selectedPlanilla) {
-            showToast({ type: 'warning', message: 'Seleccione una planilla primero' });
-            return;
-        }
-        setLoading(true);
-        try {
-            const response = await fetch(`/api/reportes/${tipo}/${selectedPlanilla}`);
-            if (!response.ok) throw new Error('Error al obtener reporte');
-            const data = await response.json();
-            setReporteData(data);
-            setModalType(tipo);
-            setModalOpen(true);
-        } catch (error) {
-            showToast({ type: 'error', message: error.message });
-        } finally {
-            setLoading(false);
-        }
-    };
+    // ── Selectores ────────────────────────────────────────────────────────
 
-    const formatCurrency = (amount) => {
-        return new Intl.NumberFormat('es-PA', { style: 'currency', currency: 'USD' }).format(amount);
-    };
-
-    const formatDate = (dateString) => {
-        return new Date(dateString).toLocaleDateString('es-PA');
-    };
-
-    const ReporteCard = ({ title, description, icon, color, borderColor, bgGradient, tipo, comingSoon }) => (
-        <div className={`rounded-2xl shadow-sm hover:shadow-md transition-shadow p-6 ${bgGradient} border ${borderColor}`}>
-            {/* Icono y título */}
-            <div className="flex items-start gap-4 mb-4">
-                <div className={`w-12 h-12 ${color} rounded-full flex items-center justify-center shadow-md`}>
-                    {icon}
-                </div>
-                <div className="flex-1">
-                    <h3 className="font-semibold text-lg text-gray-900 flex items-center gap-2">
-                        {title}
-                        {comingSoon && <span className="px-2 py-0.5 bg-yellow-100 text-yellow-700 text-xs rounded-full">Próximamente</span>}
-                    </h3>
-                    <p className="text-sm text-gray-600 mt-1">{description}</p>
-                </div>
-            </div>
-
-            {/* Select planilla */}
-            <select
-                value={selectedPlanilla}
-                onChange={(e) => setSelectedPlanilla(e.target.value)}
-                disabled={comingSoon}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 mb-4 disabled:opacity-50"
-            >
-                <option value="">Seleccionar planilla...</option>
-                {planillas.map(p => (
+    const PlanillaSelect = ({ value, onChange }) => (
+        <select
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            className="w-full px-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 mb-4 text-sm"
+        >
+            <option value="">Seleccionar planilla...</option>
+            {loadingPlanillas
+                ? <option disabled>Cargando...</option>
+                : planillas.map(p => (
                     <option key={p.id} value={p.id}>
-                        {p.payrollNumber} - {formatDate(p.periodStartDate)} a {formatDate(p.periodEndDate)}
+                        {p.payrollNumber} — {formatDate(p.periodStartDate)} a {formatDate(p.periodEndDate)}
                     </option>
-                ))}
-            </select>
-
-            {/* Botones */}
-            <div className="flex gap-2">
-                <button
-                    onClick={() => verReporte(tipo)}
-                    disabled={!selectedPlanilla || loading || comingSoon}
-                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium text-white ${color} rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity`}
-                >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                    Ver
-                </button>
-                <button
-                    onClick={() => descargarExcel(tipo)}
-                    disabled={!selectedPlanilla || loading || comingSoon}
-                    className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    Excel
-                </button>
-                <button
-                    onClick={() => descargarPdf(tipo)}
-                    disabled={!selectedPlanilla || loading || comingSoon}
-                    className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                    </svg>
-                    PDF
-                </button>
-            </div>
-        </div>
+                ))
+            }
+        </select>
     );
+
+    // ── Modal content ─────────────────────────────────────────────────────
 
     const renderModalContent = () => {
         if (!reporteData) return null;
 
-        if (modalType === 'css') {
-            return (
-                <div className="overflow-x-auto">
-                    <table className="w-full">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cédula</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nombre</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Salario Bruto</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Base CSS</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">CSS Empleado</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">CSS Patrono</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Riesgo Prof.</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200">
-                            {reporteData.empleados?.map((emp, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 text-sm">{emp.cedula}</td>
-                                    <td className="px-4 py-3 text-sm">{emp.nombreCompleto}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.salarioBruto)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.baseCss)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.cssEmpleado)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.cssPatrono)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.riesgoProfesional)}</td>
-                                    <td className="px-4 py-3 text-sm text-right font-medium">{formatCurrency(emp.totalCss)}</td>
-                                </tr>
-                            ))}
-                            <tr className="bg-yellow-100 font-bold">
-                                <td className="px-4 py-3 text-sm" colSpan="2">TOTALES</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalSalarios)}</td>
-                                <td className="px-4 py-3 text-sm"></td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalCssEmpleado)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalCssPatrono)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalRiesgo)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.granTotal)}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            );
-        }
-
-        if (modalType === 'seguro-educativo') {
-            return (
-                <div className="overflow-x-auto">
-                    <table className="w-full">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cédula</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nombre</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Salario Bruto</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">SE Empleado</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">SE Patrono</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total SE</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200">
-                            {reporteData.empleados?.map((emp, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 text-sm">{emp.cedula}</td>
-                                    <td className="px-4 py-3 text-sm">{emp.nombreCompleto}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.salarioBruto)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.seEmpleado)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.sePatrono)}</td>
-                                    <td className="px-4 py-3 text-sm text-right font-medium">{formatCurrency(emp.totalSe)}</td>
-                                </tr>
-                            ))}
-                            <tr className="bg-yellow-100 font-bold">
-                                <td className="px-4 py-3 text-sm" colSpan="2">TOTALES</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalSalarios)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalSeEmpleado)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalSePatrono)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.granTotal)}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            );
-        }
-
-        if (modalType === 'isr') {
-            return (
-                <div className="overflow-x-auto">
-                    <table className="w-full">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cédula</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Nombre</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Ingreso Anual</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Dependientes</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Deducción Dep.</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Base Gravable</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">ISR Anual</th>
-                                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">ISR Período</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-200">
-                            {reporteData.empleados?.map((emp, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 text-sm">{emp.cedula}</td>
-                                    <td className="px-4 py-3 text-sm">{emp.nombreCompleto}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.ingresoAnualProyectado)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{emp.dependientes}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.deduccionDependientes)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.baseGravable)}</td>
-                                    <td className="px-4 py-3 text-sm text-right">{formatCurrency(emp.isrAnual)}</td>
-                                    <td className="px-4 py-3 text-sm text-right font-medium">{formatCurrency(emp.isrPeriodo)}</td>
-                                </tr>
-                            ))}
-                            <tr className="bg-yellow-100 font-bold">
-                                <td className="px-4 py-3 text-sm" colSpan="2">TOTALES</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalIngresos)}</td>
-                                <td className="px-4 py-3 text-sm"></td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalDeducciones)}</td>
-                                <td className="px-4 py-3 text-sm"></td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalIsrAnual)}</td>
-                                <td className="px-4 py-3 text-sm text-right">{formatCurrency(reporteData.totales?.totalIsrPeriodo)}</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-            );
-        }
-
-        if (modalType === 'planilla-detallada') {
+        // Planilla Regular
+        if (modalType === 'planilla-regular') {
             return (
                 <div className="overflow-x-auto">
                     <table className="w-full text-xs">
-                        <thead className="bg-gray-50">
+                        <thead className="bg-navy-800">
                             <tr>
-                                <th className="px-2 py-2 text-left font-medium text-gray-500 uppercase">Cédula</th>
-                                <th className="px-2 py-2 text-left font-medium text-gray-500 uppercase">Nombre</th>
-                                <th className="px-2 py-2 text-left font-medium text-gray-500 uppercase">Depto</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Sal. Base</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Hrs Extra</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Bruto</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">CSS</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">SE</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">ISR</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Otras Ded.</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Total Ded.</th>
-                                <th className="px-2 py-2 text-right font-medium text-gray-500 uppercase">Neto</th>
+                                <th className="px-2 py-2 w-6"></th>
+                                <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Cédula</th>
+                                <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Nombre</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Hs. Reg.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Hs. Dom.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Hs. Fer.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Hs. Extra</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Bruto</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">CSS</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">SE</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">ISR</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Acreed.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">P.Alim</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Embar.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Volunt.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Tot.Ded</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Neto</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-200">
-                            {reporteData.empleados?.map((emp, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50">
-                                    <td className="px-2 py-2">{emp.cedula}</td>
-                                    <td className="px-2 py-2">{emp.nombreCompleto}</td>
-                                    <td className="px-2 py-2">{emp.departamento || '-'}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.salarioBase)}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.horasExtra)}</td>
-                                    <td className="px-2 py-2 text-right font-medium">{formatCurrency(emp.salarioBruto)}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.cssEmpleado)}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.seEmpleado)}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.isr)}</td>
-                                    <td className="px-2 py-2 text-right">{formatCurrency(emp.otrasDeducciones)}</td>
-                                    <td className="px-2 py-2 text-right font-medium">{formatCurrency(emp.totalDeducciones)}</td>
-                                    <td className="px-2 py-2 text-right font-bold text-green-600">{formatCurrency(emp.salarioNeto)}</td>
-                                </tr>
-                            ))}
-                            <tr className="bg-yellow-100 font-bold">
-                                <td className="px-2 py-2" colSpan="3">TOTALES</td>
-                                <td className="px-2 py-2 text-right">{formatCurrency(reporteData.totalBruto)}</td>
+                        <tbody className="divide-y divide-navy-700">
+                            {(reporteData.empleados || []).map((emp, idx) => {
+                                const hasDesglose = (emp.desgloseHoras || []).length > 0;
+                                const isExpanded = expandedRows.has(idx);
+                                return (
+                                    <React.Fragment key={idx}>
+                                        <tr className={`hover:bg-navy-800 ${emp.tuvoLimitacion ? 'bg-orange-500/5' : ''}`}>
+                                            <td className="px-2 py-2">
+                                                {hasDesglose && (
+                                                    <button onClick={() => toggleRow(idx)} className="text-gray-500 hover:text-emerald-400 transition-colors">
+                                                        {isExpanded ? '▾' : '▸'}
+                                                    </button>
+                                                )}
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-300">{emp.cedula}</td>
+                                            <td className="px-3 py-2 text-gray-300">
+                                                {emp.nombreCompleto}
+                                                {emp.tuvoLimitacion && <span className="ml-1 text-orange-400 text-xs">⚠</span>}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-400">{formatHoras(emp.horasRegulares)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-400">{formatHoras(emp.horasDomingo)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-400">{formatHoras(emp.horasFeriado)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-400">{formatHoras(emp.horasExtra)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-100">{formatCurrency(emp.salarioBruto)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.cssEmpleado)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.seEmpleado)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.isr)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalAcreedores)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.pensionAlimenticia)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.embargos)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.deduccionesVoluntarias)}</td>
+                                            <td className="px-3 py-2 text-right font-mono text-red-400">{formatCurrency(emp.totalDeducciones)}</td>
+                                            <td className="px-3 py-2 text-right font-bold font-mono text-green-400">{formatCurrency(emp.salarioNeto)}</td>
+                                        </tr>
+                                        {isExpanded && hasDesglose && (
+                                            <tr>
+                                                <td colSpan="17" className="px-0 py-0 bg-navy-900/60">
+                                                    <div className="ml-10 mr-4 my-1">
+                                                        <table className="w-full text-xs border border-navy-700 rounded">
+                                                            <thead>
+                                                                <tr className="bg-navy-700">
+                                                                    <th className="px-3 py-1 text-left text-gray-400 font-medium uppercase">Tipo / Concepto</th>
+                                                                    <th className="px-3 py-1 text-right text-gray-400 font-medium uppercase">Horas</th>
+                                                                    <th className="px-3 py-1 text-right text-gray-400 font-medium uppercase">Tarifa x Hora</th>
+                                                                    <th className="px-3 py-1 text-right text-gray-400 font-medium uppercase">Valor</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {emp.desgloseHoras.map((linea, li) => (
+                                                                    <tr key={li} className="border-t border-navy-700">
+                                                                        <td className="px-3 py-1 text-gray-300">{linea.tipoConcepto}</td>
+                                                                        <td className="px-3 py-1 text-right font-mono text-gray-400">{linea.horas.toFixed(2)}</td>
+                                                                        <td className="px-3 py-1 text-right font-mono text-gray-400">{formatCurrency(linea.tarifaPorHora)}</td>
+                                                                        <td className="px-3 py-1 text-right font-mono text-emerald-400">{formatCurrency(linea.valor)}</td>
+                                                                    </tr>
+                                                                ))}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </React.Fragment>
+                                );
+                            })}
+                            <tr className="bg-amber-500/15 font-bold">
                                 <td className="px-2 py-2"></td>
-                                <td className="px-2 py-2 text-right">{formatCurrency(reporteData.totalBruto)}</td>
-                                <td className="px-2 py-2" colSpan="4"></td>
-                                <td className="px-2 py-2 text-right">{formatCurrency(reporteData.totalDeducciones)}</td>
-                                <td className="px-2 py-2 text-right">{formatCurrency(reporteData.totalNeto)}</td>
+                                <td className="px-3 py-2 text-amber-400" colSpan="6">TOTALES ({reporteData.totales?.totalEmpleados} empleados)</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalBruto)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalCss)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalSe)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalIsr)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalAcreedores)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalPensionAlimenticia)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalEmbargos)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalDeduccionesVoluntarias)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalDeducciones)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalNeto)}</td>
                             </tr>
                         </tbody>
                     </table>
@@ -358,154 +317,469 @@ const ReportesPage = () => {
             );
         }
 
-        return null;
+        // SIP
+        if (modalType === 'sip') {
+            const fuentes = reporteData.fuentes || [];
+            const hayVac = (reporteData.totalVacaciones || 0) > 0;
+            return (
+                <div className="overflow-x-auto">
+                    {fuentes.length > 0 && (
+                        <div className="mb-3 text-xs text-gray-400">
+                            <span className="text-gray-500">Incluye:</span> {fuentes.join(' · ')}
+                            {hayVac && <span className="ml-2 text-gray-500">· de los cuales vacaciones <span className="font-mono text-gray-300">{formatCurrency(reporteData.totalVacaciones)}</span></span>}
+                        </div>
+                    )}
+                    {fuentes.length === 0 && (reporteData.empleados || []).length === 0 && (
+                        <p className="text-sm text-gray-400 mb-3">Nada cotiza en este mes: no hay planillas aprobadas, décimo ni liquidaciones con período en él.</p>
+                    )}
+                    <table className="w-full text-xs">
+                        <thead className="bg-navy-800">
+                            <tr>
+                                <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Cédula</th>
+                                <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Nombre</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Sal. Bruto</th>
+                                {hayVac && <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase" title="Parte del bruto que fue vacaciones">Vacac.</th>}
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Base CSS</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">CSS Emp.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">CSS Pat.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">SE Emp.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">SE Pat.</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Riesgo</th>
+                                <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total SIP</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-navy-700">
+                            {(reporteData.empleados || []).map((emp, idx) => (
+                                <tr key={idx} className="hover:bg-navy-800">
+                                    <td className="px-3 py-2 text-gray-300">{emp.cedula}</td>
+                                    <td className="px-3 py-2 text-gray-300">{emp.nombreCompleto}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-100">{formatCurrency(emp.salarioBruto)}</td>
+                                    {hayVac && <td className="px-3 py-2 text-right font-mono text-gray-400">{formatCurrency(emp.vacaciones)}</td>}
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.baseCss)}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.cssEmpleado)}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.cssPatronal)}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.seEmpleado)}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.sePatronal)}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.riesgoProfesional)}</td>
+                                    <td className="px-3 py-2 text-right font-bold font-mono text-blue-400">{formatCurrency(emp.totalSip)}</td>
+                                </tr>
+                            ))}
+                            <tr className="bg-amber-500/15 font-bold">
+                                <td className="px-3 py-2 text-amber-400" colSpan="2">TOTALES</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalSalarios)}</td>
+                                {hayVac && <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totalVacaciones)}</td>}
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalBaseCss)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalCssEmpleado)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalCssPatronal)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalSeEmpleado)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalSePatronal)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.totalRiesgo)}</td>
+                                <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalSip)}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            );
+        }
+
+        // Acreedores
+        if (modalType === 'acreedores') {
+            const acreedores = reporteData.acreedores || [];
+            return (
+                <div className="space-y-6">
+                    {/* Resumen rápido */}
+                    <div className="grid grid-cols-2 gap-4 p-4 bg-navy-800 rounded-lg">
+                        <div>
+                            <span className="text-xs text-gray-500 uppercase">Total Acreedores</span>
+                            <p className="text-lg font-bold text-gray-100">{reporteData.totalAcreedores}</p>
+                        </div>
+                        <div>
+                            <span className="text-xs text-gray-500 uppercase">Gran Total</span>
+                            <p className="text-lg font-bold text-green-400">{formatCurrency(reporteData.granTotal)}</p>
+                        </div>
+                    </div>
+
+                    {acreedores.length === 0 ? (
+                        <p className="text-gray-500 text-center py-8">No hay deducciones de acreedores en esta planilla.</p>
+                    ) : (
+                        acreedores.map((acreedor, idx) => (
+                            <div key={idx} className="border border-navy-700 rounded-lg overflow-hidden">
+                                {/* Cabecera acreedor */}
+                                <div className="bg-navy-800 px-4 py-3 flex items-center justify-between">
+                                    <div>
+                                        <h4 className="font-bold text-gray-100">{acreedor.nombreAcreedor}</h4>
+                                        <div className="flex gap-4 mt-1 text-xs text-gray-500">
+                                            {acreedor.tipoAcreedor && <span>Tipo: {acreedor.tipoAcreedor}</span>}
+                                            {acreedor.banco && <span>Banco: {acreedor.banco}</span>}
+                                            {acreedor.numeroCuenta && <span>Cuenta: {acreedor.numeroCuenta}</span>}
+                                            {acreedor.identificacion && <span>ID: {acreedor.identificacion}</span>}
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <p className="text-xs text-gray-500">{acreedor.cantidadEmpleados} empleado(s)</p>
+                                        <p className="font-bold text-green-400">{formatCurrency(acreedor.totalATransferir)}</p>
+                                    </div>
+                                </div>
+                                {/* Detalle empleados */}
+                                <table className="w-full text-xs">
+                                    <thead className="bg-navy-900">
+                                        <tr>
+                                            <th className="px-3 py-2 text-left text-gray-500 font-medium uppercase">Empleado</th>
+                                            <th className="px-3 py-2 text-left text-gray-500 font-medium uppercase">Cédula</th>
+                                            <th className="px-3 py-2 text-left text-gray-500 font-medium uppercase">Tipo</th>
+                                            <th className="px-3 py-2 text-left text-gray-500 font-medium uppercase">Descripción</th>
+                                            <th className="px-3 py-2 text-right text-gray-500 font-medium uppercase">Solicitado</th>
+                                            <th className="px-3 py-2 text-right text-gray-500 font-medium uppercase">Aplicado</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-navy-700">
+                                        {(acreedor.empleados || []).map((emp, eIdx) => (
+                                            <tr key={eIdx} className={`hover:bg-navy-800 ${emp.fueLimitado ? 'bg-orange-500/5' : ''}`}>
+                                                <td className="px-3 py-2 text-gray-300">{emp.nombreEmpleado}</td>
+                                                <td className="px-3 py-2 text-gray-400">{emp.cedula}</td>
+                                                <td className="px-3 py-2 text-gray-400">{emp.tipoDeduccion}</td>
+                                                <td className="px-3 py-2 text-gray-400">{emp.descripcion}</td>
+                                                <td className="px-3 py-2 text-right font-mono text-gray-400">{formatCurrency(emp.montoSolicitado)}</td>
+                                                <td className="px-3 py-2 text-right font-mono text-gray-100">
+                                                    {formatCurrency(emp.montoAplicado)}
+                                                    {emp.fueLimitado && <span className="ml-1 text-orange-400">⚠</span>}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ))
+                    )}
+                </div>
+            );
+        }
+
+        // Mensual
+        if (modalType === 'mensual') {
+            return (
+                <div className="space-y-4">
+                    {/* Períodos incluidos */}
+                    {(reporteData.periodosIncluidos || []).length > 0 && (
+                        <div className="p-3 bg-navy-800 rounded-lg">
+                            <span className="text-xs text-gray-500 uppercase">Períodos incluidos: </span>
+                            <span className="text-sm text-gray-300">{reporteData.periodosIncluidos.join(', ')}</span>
+                        </div>
+                    )}
+
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                            <thead className="bg-navy-800">
+                                <tr>
+                                    <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Cédula</th>
+                                    <th className="px-3 py-2 text-left font-medium text-gray-500 uppercase">Nombre</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total Bruto</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total CSS</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total SE</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total ISR</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Acreed.</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">P.Alim</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Embar.</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Volunt.</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Tot.Ded</th>
+                                    <th className="px-3 py-2 text-right font-medium text-gray-500 uppercase">Total Neto</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-navy-700">
+                                {(reporteData.empleados || []).map((emp, idx) => (
+                                    <tr key={idx} className="hover:bg-navy-800">
+                                        <td className="px-3 py-2 text-gray-300">{emp.cedula}</td>
+                                        <td className="px-3 py-2 text-gray-300">{emp.nombreCompleto}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-100">{formatCurrency(emp.totalBruto)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalCss)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalSe)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalIsr)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalAcreedores)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalPensionAlimenticia)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalEmbargos)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-gray-300">{formatCurrency(emp.totalDeduccionesVoluntarias)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-red-400">{formatCurrency(emp.totalDeducciones)}</td>
+                                        <td className="px-3 py-2 text-right font-bold font-mono text-green-400">{formatCurrency(emp.totalNeto)}</td>
+                                    </tr>
+                                ))}
+                                {reporteData.empleados?.length === 0 && (
+                                    <tr>
+                                        <td colSpan="12" className="px-3 py-8 text-center text-gray-500">
+                                            No hay planillas calculadas para {MESES.find(m => m.value === selMes)?.label} {selAnio}
+                                        </td>
+                                    </tr>
+                                )}
+                                {(reporteData.empleados || []).length > 0 && (
+                                    <tr className="bg-amber-500/15 font-bold">
+                                        <td className="px-3 py-2 text-amber-400" colSpan="2">
+                                            TOTALES ({reporteData.totales?.totalEmpleados} empleados)
+                                        </td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalBruto)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalCss)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalSe)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalIsr)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalAcreedores)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalPensionAlimenticia)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalEmbargos)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalDeduccionesVoluntarias)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalDeducciones)}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-amber-400">{formatCurrency(reporteData.totales?.granTotalNeto)}</td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        }
+
+        return <p className="text-gray-500">Sin datos disponibles.</p>;
     };
 
-    const getModalTitle = () => {
-        const titles = {
-            'css': 'Reporte Planilla CSS',
-            'seguro-educativo': 'Reporte Seguro Educativo',
-            'isr': 'Reporte Impuesto Sobre la Renta',
-            'planilla-detallada': 'Planilla Detallada Completa'
-        };
-        return titles[modalType] || 'Reporte';
-    };
+    // ── Card components ───────────────────────────────────────────────────
+
+    // true cuando el reporte cargado tiene al menos un registro exportable
+    const hasData = reporteData && (
+        (reporteData.empleados?.length > 0) ||
+        (reporteData.acreedores?.length > 0) ||
+        (reporteData.comprobantes?.length > 0)
+    );
+
+    // Selecciones conocidas como vacías tras un "Ver" — deshabilitan Excel/PDF en las cards
+    const regularVacia    = emptySelections['planilla-regular'] === selPlanillaRegular && !!selPlanillaRegular;
+    const sipVacio        = emptySelections['sip'] === `${sipMes}-${sipAnio}`;
+    const acreedoresVacio = emptySelections['acreedores'] === selAcreedores && !!selAcreedores;
+    const mensualVacio    = emptySelections['mensual'] === `${selMes}-${selAnio}`;
+
+    const AccionBtn = ({ onClick, disabled, colorClass, icon, label }) => (
+        <button
+            onClick={onClick}
+            disabled={disabled || loading}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-navy-800 border border-navy-700 rounded-lg text-xs font-medium text-gray-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed ${colorClass}`}
+        >
+            {icon}
+            {label}
+        </button>
+    );
+
+    const iconVer = <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>;
+    const iconExcel = <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>;
+    const iconPdf = <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>;
 
     return (
         <div>
             {/* Header */}
             <div className="mb-6">
-                <h2 className="text-2xl font-bold text-gray-900">Reportes de Planilla</h2>
-                <p className="text-gray-600 mt-1">Genere y descargue reportes oficiales para CSS, Seguro Educativo, ISR y más</p>
+                <h2 className="text-2xl font-display font-bold text-gray-100">Reportes de Planilla</h2>
+                <p className="text-gray-400 mt-1">Cinco reportes operativos: planilla, SIPE mensual, acreedores, comprobantes y consolidado mensual</p>
             </div>
 
-            {/* Grid de cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <ReporteCard
-                    title="Planilla CSS"
-                    description="Reporte para la Caja de Seguro Social con aportes CSS de empleados y empleador"
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>}
-                    color="bg-blue-600"
-                    borderColor="border-blue-200"
-                    bgGradient="bg-gradient-to-br from-blue-50 to-blue-100"
-                    tipo="css"
-                />
+            {/* Grid 2 + 2 + 1 */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
-                <ReporteCard
-                    title="Seguro Educativo"
-                    description="Reporte de aportes al Seguro Educativo"
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M12 14l9-5-9-5-9 5 9 5z" /><path d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 14l9-5-9-5-9 5 9 5zm0 0l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055a11.952 11.952 0 00-6.824-2.998 12.078 12.078 0 01.665-6.479L12 14zm-4 6v-7.5l4-2.222" /></svg>}
-                    color="bg-green-600"
-                    borderColor="border-green-200"
-                    bgGradient="bg-gradient-to-br from-green-50 to-green-100"
-                    tipo="seguro-educativo"
-                />
+                {/* ── Card 1: Planilla Regular ── */}
+                <div className="bg-navy-900 border border-navy-700 hover:border-primary-500/40 rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30">
+                    <div className="w-12 h-12 bg-gradient-to-br from-primary-600/20 to-primary-500/10 border border-primary-500/20 rounded-xl flex items-center justify-center mb-4">
+                        <svg className="w-6 h-6 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                    </div>
+                    <h3 className="text-base font-bold text-gray-100 font-display mb-1">Planilla Regular</h3>
+                    <p className="text-sm text-gray-500 mb-4 leading-relaxed">Borrador operativo del período con horas, salarios, CSS/SE e importes de acreedores por empleado</p>
+                    <PlanillaSelect value={selPlanillaRegular} onChange={setSelPlanillaRegular} />
+                    <div className="flex items-center gap-2 pt-3 border-t border-navy-700">
+                        <AccionBtn onClick={() => verReporte('planilla-regular')} disabled={!selPlanillaRegular} colorClass="hover:bg-primary-600 hover:border-primary-600 hover:text-white" icon={iconVer} label="Ver" />
+                        <AccionBtn onClick={() => descargarExcel('planilla-regular')} disabled={!selPlanillaRegular || regularVacia} colorClass="hover:bg-emerald-600 hover:border-emerald-600 hover:text-white" icon={iconExcel} label="Excel" />
+                        <AccionBtn onClick={() => descargarPdf('planilla-regular')} disabled={!selPlanillaRegular || regularVacia} colorClass="hover:bg-red-600 hover:border-red-600 hover:text-white" icon={iconPdf} label="PDF" />
+                    </div>
+                </div>
 
-                <ReporteCard
-                    title="Impuesto sobre la Renta"
-                    description="Reporte ISR para la DGI con proyección anual y retenciones"
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>}
-                    color="bg-amber-600"
-                    borderColor="border-amber-200"
-                    bgGradient="bg-gradient-to-br from-amber-50 to-amber-100"
-                    tipo="isr"
-                />
+                {/* ── Card 2: SIP ── */}
+                <div className="bg-navy-900 border border-navy-700 hover:border-blue-500/40 rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30">
+                    <div className="w-12 h-12 bg-gradient-to-br from-blue-600/20 to-blue-500/10 border border-blue-500/20 rounded-xl flex items-center justify-center mb-4">
+                        <svg className="w-6 h-6 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                        </svg>
+                    </div>
+                    <h3 className="text-base font-bold text-gray-100 font-display mb-1">SIPE — CSS mensual</h3>
+                    <p className="text-sm text-gray-500 mb-4 leading-relaxed">Lo que se declara a la CSS por el mes: todas las planillas aprobadas del período, el décimo pagado y la parte cotizable de las liquidaciones, con base, CSS, SE y riesgo profesional</p>
+                    <div className="flex gap-3 mb-4">
+                        <div className="flex-1">
+                            <label htmlFor="sipe-mes" className="block text-xs text-gray-500 mb-1">Mes</label>
+                            <select id="sipe-mes" value={sipMes} onChange={e => setSipMes(parseInt(e.target.value))} className="w-full px-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm">
+                                {MESES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                            </select>
+                        </div>
+                        <div className="w-28">
+                            <label htmlFor="sipe-anio" className="block text-xs text-gray-500 mb-1">Año</label>
+                            <select id="sipe-anio" value={sipAnio} onChange={e => setSipAnio(parseInt(e.target.value))} className="w-full px-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm">
+                                {ANIOS.map(a => <option key={a} value={a}>{a}</option>)}
+                            </select>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 pt-3 border-t border-navy-700">
+                        <AccionBtn onClick={() => verReporte('sip')} colorClass="hover:bg-primary-600 hover:border-primary-600 hover:text-white" icon={iconVer} label="Ver" />
+                        <AccionBtn onClick={() => descargarExcel('sip')} disabled={sipVacio} colorClass="hover:bg-emerald-600 hover:border-emerald-600 hover:text-white" icon={iconExcel} label="Excel" />
+                        <AccionBtn onClick={() => descargarPdf('sip')} disabled={sipVacio} colorClass="hover:bg-red-600 hover:border-red-600 hover:text-white" icon={iconPdf} label="PDF" />
+                    </div>
+                </div>
 
-                <ReporteCard
-                    title="Planilla Detallada"
-                    description="Desglose completo de la planilla con todos los conceptos: salarios, deducciones, horas extra, etc."
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>}
-                    color="bg-purple-600"
-                    borderColor="border-purple-200"
-                    bgGradient="bg-gradient-to-br from-purple-50 to-purple-100"
-                    tipo="planilla-detallada"
-                />
+                {/* ── Card 3: Acreedores ── */}
+                <div className="bg-navy-900 border border-navy-700 hover:border-emerald-500/40 rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30">
+                    <div className="w-12 h-12 bg-gradient-to-br from-emerald-600/20 to-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center mb-4">
+                        <svg className="w-6 h-6 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z" />
+                        </svg>
+                    </div>
+                    <h3 className="text-base font-bold text-gray-100 font-display mb-1">Acreedores</h3>
+                    <p className="text-sm text-gray-500 mb-4 leading-relaxed">Lista de transferencias bancarias agrupadas por beneficiario con datos de cuenta para contabilidad</p>
+                    <PlanillaSelect value={selAcreedores} onChange={setSelAcreedores} />
+                    <div className="flex items-center gap-2 pt-3 border-t border-navy-700">
+                        <AccionBtn onClick={() => verReporte('acreedores')} disabled={!selAcreedores} colorClass="hover:bg-primary-600 hover:border-primary-600 hover:text-white" icon={iconVer} label="Ver" />
+                        <AccionBtn onClick={() => descargarExcel('acreedores')} disabled={!selAcreedores || acreedoresVacio} colorClass="hover:bg-emerald-600 hover:border-emerald-600 hover:text-white" icon={iconExcel} label="Excel" />
+                        <AccionBtn onClick={() => descargarPdf('acreedores')} disabled={!selAcreedores || acreedoresVacio} colorClass="hover:bg-red-600 hover:border-red-600 hover:text-white" icon={iconPdf} label="PDF" />
+                    </div>
+                </div>
 
-                <ReporteCard
-                    title="Costos Patronales"
-                    description="Resumen de todos los aportes del empleador: CSS patronal, SE patronal, riesgo profesional"
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>}
-                    color="bg-red-600"
-                    borderColor="border-red-200"
-                    bgGradient="bg-gradient-to-br from-red-50 to-red-100"
-                    tipo="css"
-                    comingSoon
-                />
+                {/* ── Card 4: Comprobantes ── */}
+                <div className="bg-navy-900 border border-navy-700 hover:border-amber-500/40 rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30">
+                    <div className="w-12 h-12 bg-gradient-to-br from-amber-600/20 to-amber-500/10 border border-amber-500/20 rounded-xl flex items-center justify-center mb-4">
+                        <svg className="w-6 h-6 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                    </div>
+                    <h3 className="text-base font-bold text-gray-100 font-display mb-1">Comprobantes de Pago</h3>
+                    <p className="text-sm text-gray-500 mb-4 leading-relaxed">Recibos de sueldo individuales por empleado en PDF — un comprobante por página, con reserva de décimo referencial</p>
+                    <PlanillaSelect value={selComprobantes} onChange={setSelComprobantes} />
+                    <div className="flex items-center gap-2 pt-3 border-t border-navy-700">
+                        <div className="flex-1 flex items-center gap-1.5 px-3 py-2 bg-navy-800/50 border border-navy-700/50 rounded-lg text-xs text-gray-600 italic">
+                            Solo PDF (formato recibo vertical)
+                        </div>
+                        <AccionBtn onClick={() => descargarPdf('comprobantes')} disabled={!selComprobantes} colorClass="hover:bg-red-600 hover:border-red-600 hover:text-white" icon={iconPdf} label="PDF" />
+                        <AccionBtn onClick={() => descargarPdf('comprobantes-compacto')} disabled={!selComprobantes} colorClass="hover:bg-amber-600 hover:border-amber-600 hover:text-white" icon={iconPdf} label="PDF Banco" />
+                    </div>
+                </div>
 
-                <ReporteCard
-                    title="Recibos de Pago"
-                    description="Generar recibos individuales de pago para cada empleado"
-                    icon={<svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>}
-                    color="bg-gray-600"
-                    borderColor="border-gray-200"
-                    bgGradient="bg-gradient-to-br from-gray-50 to-gray-100"
-                    tipo="recibos"
-                    comingSoon
-                />
+                {/* ── Card 5: Mensual (ancho completo) ── */}
+                <div className="md:col-span-2 bg-navy-900 border border-navy-700 hover:border-purple-500/40 rounded-xl p-5 transition-all hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30">
+                    <div className="flex items-start gap-4">
+                        <div className="w-12 h-12 bg-gradient-to-br from-purple-600/20 to-purple-500/10 border border-purple-500/20 rounded-xl flex items-center justify-center flex-shrink-0">
+                            <svg className="w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                            </svg>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <h3 className="text-base font-bold text-gray-100 font-display mb-1">Reporte Mensual</h3>
+                            <p className="text-sm text-gray-500 mb-4 leading-relaxed">Consolida todas las planillas del mes seleccionado: suma brutos, deducciones CSS/SE/ISR, acreedores y neto por empleado</p>
+                            <div className="flex flex-wrap items-end gap-4">
+                                {/* Selectores mes + año */}
+                                <div className="flex gap-3 flex-1 min-w-[12rem]">
+                                    <div className="flex-1">
+                                        <label className="block text-xs text-gray-500 mb-1">Mes</label>
+                                        <select
+                                            value={selMes}
+                                            onChange={e => setSelMes(parseInt(e.target.value))}
+                                            className="w-full px-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-sm"
+                                        >
+                                            {MESES.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="w-28">
+                                        <label className="block text-xs text-gray-500 mb-1">Año</label>
+                                        <select
+                                            value={selAnio}
+                                            onChange={e => setSelAnio(parseInt(e.target.value))}
+                                            className="w-full px-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500 text-sm"
+                                        >
+                                            {ANIOS.map(a => <option key={a} value={a}>{a}</option>)}
+                                        </select>
+                                    </div>
+                                </div>
+                                {/* Botones */}
+                                <div className="flex items-center gap-2">
+                                    <AccionBtn onClick={() => verReporte('mensual')} colorClass="hover:bg-primary-600 hover:border-primary-600 hover:text-white" icon={iconVer} label="Ver" />
+                                    <AccionBtn onClick={() => descargarExcel('mensual')} disabled={mensualVacio} colorClass="hover:bg-emerald-600 hover:border-emerald-600 hover:text-white" icon={iconExcel} label="Excel" />
+                                    <AccionBtn onClick={() => descargarPdf('mensual')} disabled={mensualVacio} colorClass="hover:bg-red-600 hover:border-red-600 hover:text-white" icon={iconPdf} label="PDF" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
             </div>
 
             {/* Modal */}
-            {modalOpen && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setModalOpen(false)}>
-                    <div className="bg-white rounded-2xl shadow-2xl max-w-6xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            {modalOpen && createPortal(
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setModalOpen(false)}>
+                    <div className="bg-navy-900 rounded-2xl shadow-2xl shadow-black/30 max-w-6xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
                         {/* Header */}
-                        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                            <h3 className="text-xl font-bold text-gray-900">{getModalTitle()}</h3>
-                            <button onClick={() => setModalOpen(false)} className="text-gray-400 hover:text-gray-600">
+                        <div className="px-6 py-4 border-b border-navy-700 flex items-center justify-between">
+                            <h3 className="text-xl font-display font-bold text-gray-100">{modalTitle}</h3>
+                            <button onClick={() => setModalOpen(false)} className="text-gray-400 hover:text-gray-200">
                                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                                 </svg>
                             </button>
                         </div>
 
-                        {/* Subheader con info */}
-                        <div className="px-6 py-3 bg-gray-50 border-b border-gray-200 grid grid-cols-4 gap-4 text-sm">
+                        {/* Subheader info */}
+                        <div className="px-6 py-3 bg-navy-800 border-b border-navy-700 flex flex-wrap gap-4 text-sm">
                             <div>
                                 <span className="text-gray-500">Empresa:</span>
-                                <span className="ml-2 font-medium">{reporteData?.nombreEmpresa}</span>
+                                <span className="ml-2 font-medium text-gray-300">{reporteData?.nombreEmpresa}</span>
                             </div>
                             <div>
                                 <span className="text-gray-500">RUC:</span>
-                                <span className="ml-2 font-medium">{reporteData?.ruc}</span>
+                                <span className="ml-2 font-medium text-gray-300">{reporteData?.ruc}</span>
                             </div>
-                            <div>
-                                <span className="text-gray-500">Período:</span>
-                                <span className="ml-2 font-medium">{reporteData?.periodo}</span>
-                            </div>
-                            <div>
-                                <span className="text-gray-500">Generado:</span>
-                                <span className="ml-2 font-medium">{reporteData?.fechaGeneracion ? formatDate(reporteData.fechaGeneracion) : ''}</span>
-                            </div>
+                            {reporteData?.periodo && (
+                                <div>
+                                    <span className="text-gray-500">Período:</span>
+                                    <span className="ml-2 font-medium text-gray-300">{reporteData.periodo}</span>
+                                </div>
+                            )}
+                            {reporteData?.nombreMes && (
+                                <div>
+                                    <span className="text-gray-500">Mes:</span>
+                                    <span className="ml-2 font-medium text-gray-300">{reporteData.nombreMes} {reporteData.anio}</span>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Body con tabla */}
+                        {/* Body */}
                         <div className="flex-1 overflow-auto p-6">
                             {renderModalContent()}
                         </div>
 
-                        {/* Footer con botones */}
-                        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
-                            <button
-                                onClick={() => descargarExcel(modalType)}
-                                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
-                            >
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                </svg>
-                                Descargar Excel
-                            </button>
-                            <button
-                                onClick={() => descargarPdf(modalType)}
-                                className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2"
-                            >
-                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                                </svg>
-                                Descargar PDF
-                            </button>
+                        {/* Footer */}
+                        <div className="px-6 py-4 border-t border-navy-700 flex items-center justify-between gap-3">
+                            {!hasData && (
+                                <span className="text-xs text-amber-400 italic">Sin datos para exportar</span>
+                            )}
+                            <div className="flex gap-3 ml-auto">
+                                {modalType !== 'comprobantes' && modalType !== 'acreedores-pdf-only' && (
+                                    <button
+                                        onClick={() => descargarExcel(modalType)}
+                                        disabled={loading || !hasData}
+                                        title={!hasData ? 'No hay datos para exportar' : ''}
+                                        className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        {iconExcel} Descargar Excel
+                                    </button>
+                                )}
+                                <button
+                                    onClick={() => descargarPdf(modalType)}
+                                    disabled={loading || !hasData}
+                                    title={!hasData ? 'No hay datos para exportar' : ''}
+                                    className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {iconPdf} Descargar PDF
+                                </button>
+                            </div>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </div>
     );

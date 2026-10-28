@@ -1,7 +1,7 @@
 using System.ComponentModel.DataAnnotations;
-using Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Entities;
 
-namespace Planilla.Application.DTOs;
+namespace Vorluno.Planilla.Application.DTOs;
 
 /// <summary>
 /// DTO para visualizar los datos de una posición.
@@ -12,7 +12,7 @@ public record PosicionVerDto(
     string Codigo,
     string? Descripcion,
     bool EstaActivo,
-    int DepartamentoId,
+    int? DepartamentoId,
     string DepartamentoNombre,
     decimal SalarioMinimo,
     decimal SalarioMaximo,

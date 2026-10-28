@@ -1,6 +1,7 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Estados de un anticipo de salario
@@ -17,7 +18,7 @@ public enum EstadoAnticipo
 /// <summary>
 /// Representa un anticipo de salario solicitado por un empleado.
 /// </summary>
-public class Anticipo
+public class Anticipo : ITenantEntity
 {
     public int Id { get; set; }
 
@@ -28,9 +29,9 @@ public class Anticipo
     public Empleado Empleado { get; set; } = null!;
 
     /// <summary>
-    /// ID de la compañía (multi-tenancy)
+    /// ID del tenant al que pertenece este anticipo
     /// </summary>
-    public int CompanyId { get; set; }
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Monto del anticipo solicitado
@@ -80,4 +81,7 @@ public class Anticipo
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

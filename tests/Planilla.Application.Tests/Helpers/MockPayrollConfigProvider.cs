@@ -6,10 +6,10 @@
 // Provee configuración de prueba con valores por defecto de CSS, SE, ISR
 // ====================================================================
 
-using Planilla.Application.DTOs;
-using Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Interfaces;
 
-namespace Planilla.Application.Tests.Helpers;
+namespace Vorluno.Planilla.Application.Tests.Helpers;
 
 /// <summary>
 /// Mock de IPayrollConfigProvider para tests unitarios.
@@ -54,7 +54,7 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
     /// <summary>
     /// Obtiene configuración de tasas de CSS, SE, ISR.
     /// </summary>
-    public Task<PayrollTaxConfigDto?> GetTaxConfigAsync(int companyId, DateTime effectiveDate)
+    public Task<PayrollTaxConfigDto?> GetTaxConfigAsync(int tenantId, DateTime effectiveDate)
     {
         // Si se configuró para retornar null (simula configuración faltante)
         if (_returnNullConfig)
@@ -68,7 +68,7 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
     /// <summary>
     /// Obtiene brackets de ISR para un año fiscal.
     /// </summary>
-    public Task<List<TaxBracketDto>> GetTaxBracketsAsync(int companyId, int year)
+    public Task<List<TaxBracketDto>> GetTaxBracketsAsync(int tenantId, int year)
     {
         return Task.FromResult(_taxBrackets);
     }
@@ -80,15 +80,15 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
     {
         return new PayrollTaxConfigDto(
             Id: 1,
-            CompanyId: 1,
+            TenantId: 1,
             EffectiveStartDate: new DateTime(2025, 1, 1),
             EffectiveEndDate: null,
 
             // CSS - Empleado (fija según Ley 462)
             CssEmployeeRate: 9.75m,
 
-            // CSS - Empleador (escalonada según Ley 462)
-            // 2020-2024: 13.25%, 2025-2027: 14.25%, 2028+: 15.25%
+            // CSS - Empleador (escalonada según Reforma CSS)
+            // Hasta feb. 2027: 13.25%, mar. 2027-feb. 2029: 14.25%, desde mar. 2029: 15.25%
             CssEmployerBaseRate: 13.25m,
 
             // CSS - Topes de cotización según Ley 462
@@ -113,7 +113,10 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
 
             // ISR - Deducción por dependientes
             DependentDeductionAmount: 800m, // B/. 800 por dependiente
-            MaxDependents: 3                // Máximo 3 dependientes
+            MaxDependents: 3,               // Máximo 3 dependientes
+
+            // Salario mínimo legal (Decreto Ejecutivo 74 de 2023)
+            SalarioMinimoLegal: 700m
         );
     }
 
@@ -131,7 +134,7 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
             // Tramo 1: Exento (B/. 0 - B/. 11,000)
             new TaxBracketDto(
                 Id: 1,
-                CompanyId: 1,
+                TenantId: 1,
                 Year: 2025,
                 Order: 1,
                 Description: "Exento",
@@ -144,7 +147,7 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
             // Tramo 2: 15% (B/. 11,001 - B/. 50,000)
             new TaxBracketDto(
                 Id: 2,
-                CompanyId: 1,
+                TenantId: 1,
                 Year: 2025,
                 Order: 2,
                 Description: "15% sobre excedente de B/. 11,000",
@@ -155,16 +158,17 @@ public class MockPayrollConfigProvider : IPayrollConfigProvider
             ),
 
             // Tramo 3: 25% (B/. 50,001+)
+            // FixedAmount = 5,850 = ISR acumulado del tramo 2: (50,000 - 11,000) * 15%
             new TaxBracketDto(
                 Id: 3,
-                CompanyId: 1,
+                TenantId: 1,
                 Year: 2025,
                 Order: 3,
                 Description: "25% sobre excedente de B/. 50,000",
                 MinIncome: 50000m,
                 MaxIncome: null, // Sin límite superior (último tramo)
                 Rate: 25m,
-                FixedAmount: 0m // El servicio calcula el impuesto progresivamente
+                FixedAmount: 5850m
             )
         };
     }

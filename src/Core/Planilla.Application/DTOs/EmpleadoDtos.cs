@@ -1,6 +1,7 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
+using Vorluno.Planilla.Domain.Enums;
 
-namespace Planilla.Application.DTOs
+namespace Vorluno.Planilla.Application.DTOs
 {
     /// <summary>
     /// DTO para visualizar los datos de un empleado. Contiene los campos seguros para mostrar al exterior.
@@ -10,13 +11,35 @@ namespace Planilla.Application.DTOs
         string Nombre,
         string Apellido,
         string NumeroIdentificacion,
+        string? Email,
         decimal SalarioBase,
         DateTime FechaContratacion,
         bool EstaActivo,
         int? DepartamentoId,
         string? DepartamentoNombre,
         int? PosicionId,
-        string? PosicionNombre
+        string? PosicionNombre,
+        bool TieneAccesoSistema,
+        string? RolSistema,
+        // === Pay Info ===
+        string PayPeriodTypeName = "Quincenal",
+        int HoursPerWeek = 48,
+        decimal HoursPerPeriod = 104,
+        decimal HourlyRate = 0,
+        // === Campos existentes con default ===
+        bool IsDeleted = false,
+        string? UsuarioVinculadoEmail = null,
+        // === CSS e ISR ===
+        int YearsCotized = 0,
+        decimal AverageSalaryLast10Years = 0,
+        int Dependents = 0,
+        decimal CssRiskPercentage = 0.56m,
+        // === Pay Period numeric value para edición ===
+        int PayPeriodTypeValue = 2,
+        TipoContratoDuracion TipoContrato = TipoContratoDuracion.Indefinido,
+
+        /// <summary>Gasto de representación mensual. Tributa con tarifa propia.</summary>
+        decimal GastoRepresentacionMensual = 0m
     );
 
     /// <summary>
@@ -35,12 +58,45 @@ namespace Planilla.Application.DTOs
         [StringLength(20)]
         string NumeroIdentificacion,
 
+        [EmailAddress]
+        [StringLength(256)]
+        string? Email,
+
         [Range(0.01, double.MaxValue)]
         decimal SalarioBase,
 
         int? DepartamentoId,
 
-        int? PosicionId
+        int? PosicionId,
+
+        // === Pay Info ===
+        PayPeriodType PayPeriodType = PayPeriodType.Quincenal,
+        int HoursPerWeek = 48,
+        decimal? HoursPerPeriod = null,
+
+        // === CSS e ISR ===
+        [Range(0, 100)]
+        int YearsCotized = 0,
+
+        [Range(0, double.MaxValue)]
+        decimal AverageSalaryLast10Years = 0,
+
+        [Range(0, 3)]
+        int Dependents = 0,
+
+        [Range(0, 100)]
+        decimal CssRiskPercentage = 0.56m,
+        TipoContratoDuracion TipoContrato = TipoContratoDuracion.Indefinido,
+
+        // === Fecha de Contratación (capturada en el alta) ===
+        DateTime? FechaContratacion = null,
+
+        // === Gasto de representación ===
+        // Remuneración adicional al sueldo: para la Caja de Seguro Social es salario
+        // (Ley 51 de 2005, Art. 91 num. 6), pero la renta lo grava con tarifa propia.
+        // Por ley no puede exceder el salario del trabajador.
+        [Range(0, double.MaxValue)]
+        decimal GastoRepresentacionMensual = 0m
     );
 
     /// <summary>
@@ -55,6 +111,10 @@ namespace Planilla.Application.DTOs
         [StringLength(100)]
         string Apellido,
 
+        [EmailAddress]
+        [StringLength(256)]
+        string? Email,
+
         [Range(0.01, double.MaxValue)]
         decimal SalarioBase,
 
@@ -62,6 +122,51 @@ namespace Planilla.Application.DTOs
 
         int? DepartamentoId,
 
-        int? PosicionId
+        int? PosicionId,
+
+        // === Pay Info ===
+        PayPeriodType PayPeriodType = PayPeriodType.Quincenal,
+        int HoursPerWeek = 48,
+        decimal? HoursPerPeriod = null,
+
+        // === CSS e ISR ===
+        [Range(0, 100)]
+        int YearsCotized = 0,
+
+        [Range(0, double.MaxValue)]
+        decimal AverageSalaryLast10Years = 0,
+
+        [Range(0, 3)]
+        int Dependents = 0,
+
+        [Range(0, 100)]
+        decimal CssRiskPercentage = 0.56m,
+
+        // === Fecha de Contratación (editable) ===
+        DateTime? FechaContratacion = null,
+        TipoContratoDuracion TipoContrato = TipoContratoDuracion.Indefinido,
+
+        // === Gasto de representación ===
+        [Range(0, double.MaxValue)]
+        decimal GastoRepresentacionMensual = 0m
+    );
+
+    /// <summary>
+    /// DTO para vincular un empleado a un usuario existente.
+    /// </summary>
+    public record VincularUsuarioDto(
+        [Required(ErrorMessage = "El ID del usuario es requerido")]
+        string UserId
+    );
+
+    /// <summary>
+    /// DTO para visualizar un registro del historial salarial de un empleado
+    /// (base de los promedios de prima e indemnización en la liquidación).
+    /// </summary>
+    public record HistorialSalarialDto(
+        int Id,
+        decimal SalarioMensual,
+        DateTime FechaVigencia,
+        string? Motivo
     );
 }

@@ -1,0 +1,313 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Planilla.Application.Services;
+using Vorluno.Planilla.Application.DTOs.Tenant;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Web.Filters;
+
+namespace Vorluno.Planilla.Web.Controllers;
+
+/// <summary>
+/// Controlador para gestión del tenant actual (actualización, usuarios, audit log)
+/// SEGURIDAD: Todos los endpoints requieren autenticación
+/// CRÍTICO: Todas las queries filtradas por TenantId automáticamente
+/// </summary>
+[Authorize]
+[ApiController]
+[Route("api/[controller]")]
+public class TenantController : ControllerBase
+{
+    private readonly ITenantManagementService _tenantService;
+    private readonly IInvitationService _invitationService;
+    private readonly IAuditLogService _auditLogService;
+    private readonly IPlanUsageService _planUsageService;
+    private readonly ITenantContext _tenantContext;
+    private readonly ILogger<TenantController> _logger;
+
+    public TenantController(
+        ITenantManagementService tenantService,
+        IInvitationService invitationService,
+        IAuditLogService auditLogService,
+        IPlanUsageService planUsageService,
+        ITenantContext tenantContext,
+        ILogger<TenantController> logger)
+    {
+        _tenantService = tenantService;
+        _invitationService = invitationService;
+        _auditLogService = auditLogService;
+        _planUsageService = planUsageService;
+        _tenantContext = tenantContext;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// GET /api/tenant - Obtiene información del tenant actual con suscripción y métricas de uso
+    /// Roles: Todos los autenticados pueden ver info de su tenant
+    /// </summary>
+    [HttpGet]
+    public async Task<IActionResult> GetCurrentTenant()
+    {
+        var result = await _tenantService.GetCurrentTenantAsync();
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/tenant/usage - Obtiene métricas de uso del tenant actual
+    /// Roles: Todos los autenticados pueden ver métricas de su tenant
+    /// </summary>
+    [HttpGet("usage")]
+    public async Task<IActionResult> GetUsage()
+    {
+        var result = await _tenantService.GetUsageAsync();
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/tenant/plan-usage - Obtiene uso detallado del plan con límites, uso actual, y features disponibles
+    /// Roles: Todos los autenticados pueden ver el uso de su plan
+    /// Respuesta: Límites del plan, uso actual, porcentajes, features disponibles, warnings de upgrade
+    /// </summary>
+    [HttpGet("plan-usage")]
+    public async Task<IActionResult> GetPlanUsage()
+    {
+        try
+        {
+            var tenantId = _tenantContext.TenantId;
+            var usage = await _planUsageService.GetPlanUsageAsync(tenantId);
+            return Ok(usage);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error al obtener uso del plan");
+            return BadRequest(new { error = "Error al obtener información del plan" });
+        }
+    }
+
+    /// <summary>
+    /// PUT /api/tenant - Actualiza información del tenant actual
+    /// Roles: Owner, Admin
+    /// Audit Log: TenantUpdated
+    /// </summary>
+    [HttpPut]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> UpdateTenant([FromBody] UpdateTenantDto dto)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
+        var result = await _tenantService.UpdateTenantAsync(dto);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/tenant/users - Lista usuarios del tenant con rol, email, estado
+    /// Roles: Owner, Admin
+    /// </summary>
+    [HttpGet("users")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> GetTenantUsers()
+    {
+        var result = await _tenantService.GetTenantUsersAsync();
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// PATCH /api/tenant/users/{tenantUserId} - Cambia rol o activa/desactiva usuario
+    /// Roles: Owner, Admin
+    /// Validación: Owner no puede cambiar su propio rol si es el único Owner
+    /// Audit Log: UserRoleChanged o UserStatusChanged
+    /// </summary>
+    [HttpPatch("users/{tenantUserId}")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> UpdateTenantUser(int tenantUserId, [FromBody] UpdateTenantUserDto dto)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
+        var result = await _tenantService.UpdateTenantUserAsync(tenantUserId, dto);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// DELETE /api/tenant/users/{tenantUserId} - Elimina (soft delete) usuario del tenant
+    /// Roles: Owner, Admin
+    /// Validación: Owner no puede eliminarse a sí mismo
+    /// Audit Log: UserRemovedFromTenant
+    /// </summary>
+    [HttpDelete("users/{tenantUserId}")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> RemoveTenantUser(int tenantUserId)
+    {
+        var result = await _tenantService.RemoveTenantUserAsync(tenantUserId);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new { success = true });
+    }
+
+    /// <summary>
+    /// POST /api/tenant/invite - Crea invitación para nuevo usuario
+    /// Roles: Owner, Admin
+    /// Validación: Verifica límite MaxUsers del plan
+    /// Audit Log: InviteCreated
+    /// Respuesta: Token e InviteUrl para compartir
+    /// </summary>
+    [HttpPost("invite")]
+    [Authorize(Policy = "TenantInvite")]
+    [PlanLimits(PlanLimitType.InviteUser)] // ✅ PLAN LIMITS: Verifica automáticamente límite de usuarios
+    public async Task<IActionResult> CreateInvitation([FromBody] CreateInvitationDto dto)
+    {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
+        var result = await _invitationService.CreateInvitationAsync(dto);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return CreatedAtAction(nameof(GetPendingInvitations), new { }, result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/tenant/invitations - Lista invitaciones pendientes del tenant
+    /// Roles: Owner, Admin
+    /// </summary>
+    [HttpGet("invitations")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> GetPendingInvitations()
+    {
+        var result = await _invitationService.GetPendingInvitationsAsync();
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// DELETE /api/tenant/invitations/{invitationId} - Revoca una invitación
+    /// Roles: Owner, Admin
+    /// Audit Log: InviteRevoked
+    /// </summary>
+    [HttpDelete("invitations/{invitationId}")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> RevokeInvitation(int invitationId)
+    {
+        var result = await _invitationService.RevokeInvitationAsync(invitationId);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(new { success = true });
+    }
+
+    /// <summary>
+    /// GET /api/tenant/audit - Obtiene audit log del tenant con filtros y paginación
+    /// Roles: Owner, Admin
+    /// Query params: from, to, action, entityType, actorEmail, page, pageSize
+    /// </summary>
+    [HttpGet("audit")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> GetAuditLog([FromQuery] AuditLogFilterDto filter)
+    {
+        var result = await _auditLogService.GetAuditLogAsync(filter);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/tenant/audit/{entityType}/{entityId} - Obtiene audit log de una entidad específica
+    /// Roles: Owner, Admin
+    /// </summary>
+    [HttpGet("audit/{entityType}/{entityId}")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> GetEntityAuditLog(string entityType, string entityId)
+    {
+        var result = await _auditLogService.GetEntityAuditLogAsync(entityType, entityId);
+
+        if (!result.Success)
+        {
+            return BadRequest(new { error = result.ErrorMessage });
+        }
+
+        return Ok(result.Value);
+    }
+
+    /// <summary>
+    /// PUT /api/tenant/users/{userId}/role - Asigna un rol (sistema o personalizado) a un usuario
+    /// Roles: Owner, Admin
+    /// </summary>
+    [HttpPut("users/{userId}/role")]
+    [Authorize(Policy = "TenantManageUsers")]
+    public async Task<IActionResult> AssignRoleToUser(
+        string userId,
+        [FromBody] Vorluno.Planilla.Application.DTOs.Roles.AssignRoleToUserDto dto)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+            return BadRequest(new { error = "El ID del usuario es requerido" });
+        if (!ModelState.IsValid)
+            return BadRequest(ModelState);
+
+        dto.UserId = userId;
+
+        var roleService = HttpContext.RequestServices
+            .GetRequiredService<ICustomTenantRoleService>();
+
+        var result = await roleService.AssignRoleToUserAsync(dto);
+
+        if (!result.Success)
+            return BadRequest(new { error = result.ErrorMessage });
+
+        return Ok(new { message = "Rol asignado exitosamente" });
+    }
+}

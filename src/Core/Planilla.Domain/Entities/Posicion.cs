@@ -1,4 +1,6 @@
-namespace Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Interfaces;
+
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Nivel de riesgo profesional de una posición (afecta tasa CSS Riesgo Profesional)
@@ -13,7 +15,7 @@ public enum NivelRiesgo
 /// <summary>
 /// Representa una posición o cargo dentro de un departamento
 /// </summary>
-public class Posicion
+public class Posicion : ITenantEntity
 {
     public int Id { get; set; }
 
@@ -25,11 +27,13 @@ public class Posicion
 
     public bool EstaActivo { get; set; } = true;
 
-    // Multi-tenant
-    public int CompanyId { get; set; }
+    /// <summary>
+    /// ID del tenant al que pertenece esta posición
+    /// </summary>
+    public int TenantId { get; set; }
 
-    // Departamento al que pertenece
-    public int DepartamentoId { get; set; }
+    // Departamento al que pertenece (nullable: la posición puede quedar sin departamento si se elimina el depto)
+    public int? DepartamentoId { get; set; }
 
     // Rango salarial
     public decimal SalarioMinimo { get; set; }
@@ -43,8 +47,9 @@ public class Posicion
     public DateTime? UpdatedAt { get; set; }
 
     // Navigation properties
-    public virtual Departamento Departamento { get; set; } = null!;
+    public virtual Departamento? Departamento { get; set; }
     public virtual ICollection<Empleado> Empleados { get; set; } = new List<Empleado>();
+    public virtual Tenant? Tenant { get; set; }
 
     /// <summary>
     /// Obtiene el porcentaje de riesgo profesional según el nivel

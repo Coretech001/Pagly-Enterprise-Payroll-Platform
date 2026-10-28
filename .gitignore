@@ -1,29 +1,87 @@
-﻿# Visual Studio
-.vs/
-*.user
-*.suo
 
-# Build artifacts
-**/bin/
-**/obj/
-**/Debug/
-**/Release/
-*.dll
-*.pdb
-*.cache
+# Editor / IDE
+.cursor/
 
-# Node/Vite
-node_modules/
-dist/
+# Logs
+*.log
+backend.log
+backend-error.log
+frontend.log
+frontend-error.log
+**/logs.txt
 
-# Secrets
-appsettings.Development.json
-appsettings.*.local.json
+# Test scripts temporales
+test-*.ps1
+test-*.html
+
+# Scripts temporales de tooling (pueden contener tokens/credenciales)
+tmp_*.py
+tmp_*.json
+
+# Resúmenes temporales
+RESUMEN-*.txt
+
+# Scripts de restart temporales
+quick-restart.ps1
+restart-all.ps1
+restart-services.ps1
+
+# Documentación: se suben todos los .md y la carpeta docs/
+# (no se ignora nada de documentación aquí)
+
+# Build outputs
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
 
 # IDE
+.vs/
 .vscode/
-.claude/
-
-# Windows artifacts
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 nul
-Thumbs.db
+
+# Carpetas de configuración (docs/ se sube al repo)
+# .claude/skills/ SÍ se sube (skills compartidos del equipo)
+# .claude/settings.json SÍ se sube (permisos del proyecto, sin secretos)
+# Solo ignorar archivos locales/temporales de Claude Code
+.claude/settings.local.json
+.claude/settings.json.backup
+.claude/settings.lightweight.json
+.claude/memory/
+.claude/todos/
+.claude/scheduled_tasks.lock
+
+# scripts/ — solo ignoramos helpers sueltos no versionables (mantiene subcarpetas versionadas)
+scripts/*.bat
+scripts/*.py
+scripts/cleanup-*.ps1
+scripts/cleanup-*.sql
+scripts/run-cleanup.ps1
+scripts/verificar-db.sql
+
+# CLAUDE.md local del usuario (no se sube — tiene paths/puertos personales)
+CLAUDE.local.md
+
+# Agents: backup local y marketing context (work-in-progress personal)
+.agents-backup/
+.agents/
+
+# Tauri desktop build output (se regenera automáticamente)
+src/UI/Planilla.Desktop/src-tauri/gen/
+
+# Configuración local con credenciales (no subir a GitHub)
+**/appsettings.Development.json
+**/appsettings.Local.json
+
+# Tooling de IA / indexado local (no versionar)
+.agora/
+.remember/
+.claude/agents/
+.claude/hooks/
+**/__pycache__/

@@ -2,24 +2,31 @@
 // Planilla - PayrollHeadersController
 // Source: Core360 Stage 3
 // Creado: 2025-12-26
-// Descripción: Controller de workflow de planilla
+// Descripción: Controller de workflow de planilla con multi-tenancy seguro
 // Endpoints: CRUD + calculate, approve, pay, cancel
 // ====================================================================
 
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Planilla.Application.Services;
-using Planilla.Domain.Entities;
-using Planilla.Domain.Enums;
-using Planilla.Infrastructure.Data;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.Results;
+using Vorluno.Planilla.Application.Services;
+using Vorluno.Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Infrastructure.Data;
+using Vorluno.Planilla.Application.Helpers;
+using Vorluno.Planilla.Infrastructure.Services;
+using Vorluno.Planilla.Web.Authorization;
 
-namespace Planilla.Web.Controllers;
+namespace Vorluno.Planilla.Web.Controllers;
 
 /// <summary>
-/// Controller para gestionar el workflow de planillas.
+/// Controller para gestionar el workflow de planillas con seguridad multi-tenant.
 /// Implementa CRUD básico y transiciones de estado (calculate, approve, pay, cancel).
 /// </summary>
+[Authorize] // ✅ SEGURIDAD: Todos los endpoints requieren autenticación
 [ApiController]
 [Route("api/[controller]")]
 public class PayrollHeadersController : ControllerBase
@@ -27,34 +34,74 @@ public class PayrollHeadersController : ControllerBase
     private readonly ApplicationDbContext _context;
     private readonly PayrollStateMachine _stateMachine;
     private readonly PayrollCalculationOrchestratorPortable _orchestrator;
+    private readonly ITenantContext _tenantContext;
+    private readonly IAuditLogService _auditLogService;
+    private readonly ICurrentUserService _currentUserService;
+    private readonly IAsistenciaCalculationService _asistenciaService;
+    private readonly PayrollProcessingService _processingService;
+
+    private readonly IAcumuladoFiscalService _acumuladoFiscalService;
+    private readonly IHorasPlanillaService _horasService;
 
     public PayrollHeadersController(
         ApplicationDbContext context,
         PayrollStateMachine stateMachine,
-        PayrollCalculationOrchestratorPortable orchestrator)
+        PayrollCalculationOrchestratorPortable orchestrator,
+        ITenantContext tenantContext,
+        IAuditLogService auditLogService,
+        ICurrentUserService currentUserService,
+        IAsistenciaCalculationService asistenciaService,
+        PayrollProcessingService processingService,
+        IAcumuladoFiscalService acumuladoFiscalService,
+        IHorasPlanillaService horasService)
     {
+        _acumuladoFiscalService = acumuladoFiscalService ?? throw new ArgumentNullException(nameof(acumuladoFiscalService));
+        _horasService = horasService ?? throw new ArgumentNullException(nameof(horasService));
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _stateMachine = stateMachine ?? throw new ArgumentNullException(nameof(stateMachine));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
+        _tenantContext = tenantContext ?? throw new ArgumentNullException(nameof(tenantContext));
+        _auditLogService = auditLogService ?? throw new ArgumentNullException(nameof(auditLogService));
+        _currentUserService = currentUserService ?? throw new ArgumentNullException(nameof(currentUserService));
+        _asistenciaService = asistenciaService ?? throw new ArgumentNullException(nameof(asistenciaService));
+        _processingService = processingService ?? throw new ArgumentNullException(nameof(processingService));
     }
 
     /// <summary>
-    /// Lista todas las planillas, con filtros opcionales por CompanyId y Status.
-    /// GET /api/payrollheaders?companyId=1&status=Calculated
+    /// Lista todas las planillas del tenant actual con filtros opcionales.
+    /// 🔐 EMPLOYEE SELF-SERVICE: Si el usuario está vinculado a un empleado, solo ve las planillas donde aparece.
+    /// GET /api/payrollheaders?status=Calculated
     /// </summary>
     [HttpGet]
+    [RequirePermission(SystemPermission.PayrollView, SystemPermission.PayrollViewSelf)]
     public async Task<ActionResult<IEnumerable<PayrollHeader>>> GetPayrollHeaders(
-        [FromQuery] int? companyId,
-        [FromQuery] PayrollStatus? status)
+        [FromQuery] PayrollStatus? status,
+        [FromQuery] int? empleadoId = null,
+        [FromQuery] int? anio = null,
+        [FromQuery] int? mes = null)
     {
+        if (mes is < 1 or > 12) return BadRequest(new { message = "El mes debe estar entre 1 y 12." });
+        if (anio is < 2000 or > 2100) return BadRequest(new { message = "Año fuera de rango." });
+
+        var tenantId = _tenantContext.TenantId;
+        var linkedEmployeeId = _currentUserService.GetLinkedEmployeeId();
+
         var query = _context.PayrollHeaders
+            .Where(p => p.TenantId == tenantId) // ✅ SEGURIDAD: Filtrado por tenant obligatorio
             .Include(p => p.Details)
+                .ThenInclude(d => d.Empleado) // ✅ CRÍTICO: Incluir empleado para cálculos en frontend
+            .AsNoTracking()
             .AsQueryable();
 
-        // Filtrar por CompanyId si se especifica
-        if (companyId.HasValue)
+        // 🎯 EMPLOYEE SELF-SERVICE: Filtrar planillas donde el empleado aparece
+        if (linkedEmployeeId.HasValue)
         {
-            query = query.Where(p => p.CompanyId == companyId.Value);
+            query = query.Where(p => p.Details.Any(d => d.EmpleadoId == linkedEmployeeId.Value));
+        }
+        else if (empleadoId.HasValue)
+        {
+            // Owner/Admin puede filtrar por empleado específico (para ver perfil de empleado)
+            query = query.Where(p => p.Details.Any(d => d.EmpleadoId == empleadoId.Value));
         }
 
         // Filtrar por Status si se especifica
@@ -63,57 +110,140 @@ public class PayrollHeadersController : ControllerBase
             query = query.Where(p => p.Status == status.Value);
         }
 
-        var payrollHeaders = await query
-            .OrderByDescending(p => p.PeriodStartDate)
-            .ToListAsync();
+        // Vista por mes: una planilla pertenece al mes de su PERÍODO TRABAJADO
+        // (PeriodStartDate), nunca al de su fecha de pago. Es la misma regla del
+        // reporte mensual, del SIPE y del año fiscal de la ficha de renta.
+        if (anio.HasValue)
+        {
+            query = query.Where(p => p.PeriodStartDate.Year == anio.Value);
+            if (mes.HasValue) query = query.Where(p => p.PeriodStartDate.Month == mes.Value);
+        }
+
+        // Vista por mes: proyección ligera. Con miles de empleados, mandar los
+        // Details de cada planilla en la lista es inviable; la planilla desplegada
+        // pide sus empleados paginados a GET /{id}/details.
+        if (anio.HasValue)
+        {
+            var resumen = await query
+                .OrderBy(p => p.PeriodStartDate).ThenBy(p => p.Id)
+                .Select(p => new PayrollHeaderResumenDto(
+                    p.Id, p.PayrollNumber, p.PeriodStartDate, p.PeriodEndDate, p.PayDate,
+                    p.PayPeriodType, p.TipoPlanilla, p.Status,
+                    p.TotalGrossPay, p.TotalDeductions, p.TotalNetPay, p.TotalEmployerCost,
+                    p.Details.Count(d => linkedEmployeeId == null || d.EmpleadoId == linkedEmployeeId.Value),
+                    p.ProcessedDate, p.ApprovedDate, p.PaidDate, p.CreatedAt, p.EsExtraordinaria))
+                .ToListAsync();
+            return Ok(resumen);
+        }
+
+        var payrollHeaders = await query.OrderByDescending(p => p.PeriodStartDate).ToListAsync();
+
+        // 🎯 Si es empleado vinculado, filtrar detalles para mostrar solo SU línea
+        if (linkedEmployeeId.HasValue)
+        {
+            foreach (var header in payrollHeaders)
+            {
+                header.Details = header.Details
+                    .Where(d => d.EmpleadoId == linkedEmployeeId.Value)
+                    .ToList();
+            }
+        }
 
         return Ok(payrollHeaders);
     }
 
     /// <summary>
-    /// Obtiene una planilla específica por ID, incluyendo sus detalles.
+    /// Obtiene una planilla específica por ID del tenant actual.
+    /// 🔐 EMPLOYEE SELF-SERVICE: Si el usuario está vinculado a un empleado, solo ve su detalle de planilla.
     /// GET /api/payrollheaders/{id}
     /// </summary>
     [HttpGet("{id}")]
+    [RequirePermission(SystemPermission.PayrollView, SystemPermission.PayrollViewSelf)]
     public async Task<ActionResult<PayrollHeader>> GetPayrollHeader(int id)
     {
+        var tenantId = _tenantContext.TenantId;
+        var linkedEmployeeId = _currentUserService.GetLinkedEmployeeId();
+
         var payrollHeader = await _context.PayrollHeaders
+            .Where(p => p.Id == id && p.TenantId == tenantId) // ✅ SEGURIDAD: Verificar tenant
             .Include(p => p.Details)
                 .ThenInclude(d => d.Empleado)
-            .FirstOrDefaultAsync(p => p.Id == id);
+            .AsNoTracking()
+            .FirstOrDefaultAsync();
 
         if (payrollHeader == null)
         {
             return NotFound(new { message = $"Planilla con ID {id} no encontrada" });
         }
 
+        // 🎯 EMPLOYEE SELF-SERVICE: Verificar que el empleado está en esta planilla
+        if (linkedEmployeeId.HasValue)
+        {
+            var hasEmployeeInPayroll = payrollHeader.Details.Any(d => d.EmpleadoId == linkedEmployeeId.Value);
+            if (!hasEmployeeInPayroll)
+            {
+                return Forbid(); // 403 - El empleado no está en esta planilla
+            }
+
+            // Filtrar detalles para mostrar solo SU línea
+            payrollHeader.Details = payrollHeader.Details
+                .Where(d => d.EmpleadoId == linkedEmployeeId.Value)
+                .ToList();
+        }
+
         return Ok(payrollHeader);
     }
 
     /// <summary>
-    /// Crea una nueva planilla en estado Draft.
+    /// Crea una nueva planilla en estado Draft para el tenant actual.
     /// POST /api/payrollheaders
     /// </summary>
     [HttpPost]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
     public async Task<ActionResult<PayrollHeader>> CreatePayrollHeader([FromBody] CreatePayrollHeaderRequest request)
     {
+        var tenantId = _tenantContext.TenantId;
+
+        // Validación de fechas en el servidor (antes solo la hacía la pantalla).
+        if (request.PeriodEndDate.Date <= request.PeriodStartDate.Date)
+            return BadRequest(new { message = "La fecha de fin del período debe ser posterior a la de inicio." });
+        if (request.PayDate.HasValue && request.PayDate.Value.Date < request.PeriodStartDate.Date)
+            return BadRequest(new { message = "La fecha de pago no puede ser anterior al inicio del período." });
+        if ((request.PeriodEndDate.Date - request.PeriodStartDate.Date).TotalDays > 62)
+            return BadRequest(new { message = "Un período no puede durar más de dos meses." });
+
+        var payDate = request.PayDate ?? request.PeriodEndDate;
+
+        // Extraordinaria: hace falta saber a quién se le paga, y que estén activos.
+        List<int>? soloEmpleados = null;
+        if (request.EsExtraordinaria)
+        {
+            soloEmpleados = request.EmpleadoIds?.Distinct().ToList() ?? new List<int>();
+            if (soloEmpleados.Count == 0)
+                return BadRequest(new { message = "Elige al menos a una persona para la planilla extraordinaria." });
+            var validos = await _context.Empleados
+                .CountAsync(e => e.TenantId == tenantId && e.EstaActivo && soloEmpleados.Contains(e.Id));
+            if (validos != soloEmpleados.Count)
+                return BadRequest(new { message = "Alguna de las personas elegidas no existe o no está activa." });
+        }
+
         // ====================================================================
         // Auto-generar PayrollNumber si no se proporciona o si ya existe
         // ====================================================================
-        string payrollNumber = request.PayrollNumber;
+        string payrollNumber = request.PayrollNumber ?? string.Empty;
 
-        // Verificar si el PayrollNumber ya existe para esta compañía
+        // Verificar si el PayrollNumber ya existe para este tenant
         bool numberExists = await _context.PayrollHeaders
-            .AnyAsync(p => p.CompanyId == request.CompanyId && p.PayrollNumber == payrollNumber);
+            .AnyAsync(p => p.TenantId == tenantId && p.PayrollNumber == payrollNumber);
 
         // Si no se proporciona o ya existe, auto-generar uno nuevo
         if (string.IsNullOrWhiteSpace(payrollNumber) || numberExists)
         {
             int year = request.PeriodStartDate.Year;
 
-            // Obtener el último número de planilla del año para esta compañía
+            // Obtener el último número de planilla del año para este tenant
             var lastPayroll = await _context.PayrollHeaders
-                .Where(p => p.CompanyId == request.CompanyId
+                .Where(p => p.TenantId == tenantId
                     && p.PayrollNumber.StartsWith($"{year}-"))
                 .OrderByDescending(p => p.PayrollNumber)
                 .FirstOrDefaultAsync();
@@ -135,31 +265,152 @@ public class PayrollHeadersController : ControllerBase
 
         var payrollHeader = new PayrollHeader
         {
-            CompanyId = request.CompanyId,
+            TenantId = tenantId, // ✅ SEGURIDAD: TenantId del token JWT
             PayrollNumber = payrollNumber,
-            PeriodStartDate = request.PeriodStartDate,
-            PeriodEndDate = request.PeriodEndDate,
-            PayDate = request.PayDate,
+            PeriodStartDate = DateTime.SpecifyKind(request.PeriodStartDate, DateTimeKind.Utc),
+            PeriodEndDate = DateTime.SpecifyKind(request.PeriodEndDate, DateTimeKind.Utc),
+            PayDate = DateTime.SpecifyKind(payDate, DateTimeKind.Utc),
+            PayPeriodType = request.PayPeriodType,
+            TipoPlanilla = request.TipoPlanilla,
+            EsExtraordinaria = request.EsExtraordinaria,
             Status = PayrollStatus.Draft,
             CreatedAt = DateTime.UtcNow
         };
 
         _context.PayrollHeaders.Add(payrollHeader);
 
+        int horasGeneradas = 0;
+        ResumenNovedades? novedades = null;
         try
         {
+            // La planilla nace con sus horas: una fila por empleado activo con
+            // sus regulares, más las horas extra y ausencias aprobadas del
+            // período. Todo en una transacción: o queda completa o no queda.
+            await using var tx = await _context.Database.BeginTransactionAsync();
             await _context.SaveChangesAsync();
+            horasGeneradas = await _horasService.GenerarHorasPorDefectoAsync(payrollHeader, soloEmpleados);
+            novedades = await _horasService.ImportarNovedadesAsync(payrollHeader, ModoNovedades.Sobrescribir);
+            await _context.SaveChangesAsync();
+            await tx.CommitAsync();
+
+            // ✅ AUDIT LOG: Registrar creación de planilla
+            try
+            {
+                await _auditLogService.LogAsync(
+                    "PayrollCreated",
+                    "PayrollHeader",
+                    payrollHeader.Id.ToString(),
+                    new Dictionary<string, string>
+                    {
+                        ["PayrollNumber"] = payrollHeader.PayrollNumber,
+                        ["PeriodStart"] = payrollHeader.PeriodStartDate.ToString("yyyy-MM-dd"),
+                        ["PeriodEnd"] = payrollHeader.PeriodEndDate.ToString("yyyy-MM-dd"),
+                        ["PayDate"] = payrollHeader.PayDate.ToString("yyyy-MM-dd"),
+                        ["Status"] = payrollHeader.Status.ToString(),
+                        ["Extraordinaria"] = payrollHeader.EsExtraordinaria ? "si" : "no",
+                        ["HorasGeneradas"] = horasGeneradas.ToString(),
+                        ["EmpleadosConNovedades"] = (novedades?.EmpleadosConNovedades ?? 0).ToString()
+                    });
+            }
+            catch (Exception)
+            {
+                // No bloqueamos la operación si falla el audit log
+            }
         }
-        catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_PayrollHeader_CompanyId_PayrollNumber") == true)
+        catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_PayrollHeader_TenantId_PayrollNumber") == true)
         {
             return Conflict(new
             {
-                message = $"Ya existe una planilla con el número '{payrollNumber}' para esta compañía",
+                message = $"Ya existe una planilla con el número '{payrollNumber}' para tu empresa",
                 detail = "Por favor, intente nuevamente con un número diferente"
             });
         }
 
-        return CreatedAtAction(nameof(GetPayrollHeader), new { id = payrollHeader.Id }, payrollHeader);
+        return CreatedAtAction(nameof(GetPayrollHeader), new { id = payrollHeader.Id }, new
+        {
+            payrollHeader.Id,
+            payrollHeader.PayrollNumber,
+            payrollHeader.PeriodStartDate,
+            payrollHeader.PeriodEndDate,
+            payrollHeader.PayDate,
+            payrollHeader.PayPeriodType,
+            payrollHeader.TipoPlanilla,
+            payrollHeader.EsExtraordinaria,
+            payrollHeader.Status,
+            horasGeneradas,
+            novedades = new
+            {
+                empleados = novedades?.EmpleadosConNovedades ?? 0,
+                horasExtra = novedades?.HorasExtra ?? 0m,
+                horasAusencia = novedades?.HorasAusencia ?? 0m,
+            }
+        });
+    }
+
+    /// <summary>
+    /// Antes de crear una extraordinaria: ¿alguna de esas personas ya está en
+    /// otra planilla (no anulada) que cubre parte de ese período? Para no
+    /// pagar dos veces. No bloquea: la pantalla lo enseña.
+    /// POST /api/payrollheaders/extraordinaria/verificar
+    /// </summary>
+    [HttpPost("extraordinaria/verificar")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<ActionResult> VerificarExtraordinaria([FromBody] VerificarExtraordinariaRequest request)
+    {
+        var tenantId = _tenantContext.TenantId;
+        var ids = request.EmpleadoIds?.Distinct().ToList() ?? new List<int>();
+        if (ids.Count == 0) return Ok(Array.Empty<object>());
+
+        var inicio = request.PeriodStartDate.Date;
+        var fin = request.PeriodEndDate.Date;
+
+        // Está en una planilla si tiene su detalle (calculada) o su fila de horas (borrador).
+        var cruzadas = await _context.PayrollHeaders.AsNoTracking()
+            .Where(p => p.TenantId == tenantId && p.Status != PayrollStatus.Cancelled
+                     && p.PeriodStartDate <= fin && p.PeriodEndDate >= inicio)
+            .Select(p => new { p.Id, p.PayrollNumber, p.PeriodStartDate, p.PeriodEndDate, p.Status, p.EsExtraordinaria })
+            .ToListAsync();
+        var planillaIds = cruzadas.Select(p => p.Id).ToList();
+        var conDetalle = await _context.PayrollDetails.AsNoTracking()
+            .Where(d => planillaIds.Contains(d.PayrollHeaderId) && ids.Contains(d.EmpleadoId))
+            .Select(d => new { d.PayrollHeaderId, d.EmpleadoId })
+            .ToListAsync();
+        var conHoras = await _context.PayrollEmployeeHours.AsNoTracking()
+            .Where(h => planillaIds.Contains(h.PayrollHeaderId) && ids.Contains(h.EmpleadoId))
+            .Select(h => new { h.PayrollHeaderId, h.EmpleadoId })
+            .ToListAsync();
+        var pares = conDetalle.Concat(conHoras).Distinct().ToList();
+        var enPlanillas = cruzadas
+            .Select(p => new
+            {
+                p.PayrollNumber, p.PeriodStartDate, p.PeriodEndDate, p.Status, p.EsExtraordinaria,
+                Empleados = pares.Where(x => x.PayrollHeaderId == p.Id).Select(x => x.EmpleadoId).ToList(),
+            })
+            .ToList();
+
+        var nombres = await _context.Empleados.AsNoTracking()
+            .Where(e => e.TenantId == tenantId && ids.Contains(e.Id))
+            .ToDictionaryAsync(e => e.Id, e => $"{e.Nombre} {e.Apellido}");
+
+        var estado = new Dictionary<PayrollStatus, string>
+        {
+            [PayrollStatus.Draft] = "en borrador", [PayrollStatus.Calculated] = "calculada",
+            [PayrollStatus.Approved] = "aprobada", [PayrollStatus.Paid] = "pagada",
+        };
+
+        var resultado = ids
+            .Select(id => new
+            {
+                empleadoId = id,
+                nombre = nombres.TryGetValue(id, out var n) ? n : "",
+                planillas = enPlanillas.Where(p => p.Empleados.Contains(id))
+                    .Select(p => $"{p.PayrollNumber}{(p.EsExtraordinaria ? " (extraordinaria)" : "")}, {p.PeriodStartDate:dd/MM}–{p.PeriodEndDate:dd/MM}, {estado.GetValueOrDefault(p.Status, "")}")
+                    .ToList(),
+            })
+            .Where(x => x.planillas.Count > 0)
+            .ToList();
+
+        return Ok(resultado);
     }
 
     /// <summary>
@@ -167,10 +418,12 @@ public class PayrollHeadersController : ControllerBase
     /// POST /api/payrollheaders/{id}/calculate
     /// </summary>
     [HttpPost("{id}/calculate")]
-    [Authorize(Policy = "CanCalculatePayroll")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
     public async Task<ActionResult> CalculatePayroll(int id, [FromServices] ILogger<PayrollHeadersController> logger)
     {
-        var payrollHeader = await _context.PayrollHeaders.FindAsync(id);
+        var tenantId = _tenantContext.TenantId;
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
 
         if (payrollHeader == null)
         {
@@ -193,10 +446,10 @@ public class PayrollHeadersController : ControllerBase
         try
         {
             // ====================================================================
-            // 1. Obtener empleados activos de la compañía
+            // 1. Obtener empleados activos del tenant
             // ====================================================================
             var activeEmployees = await _context.Empleados
-                .Where(e => e.CompanyId == payrollHeader.CompanyId && e.EstaActivo)
+                .Where(e => e.TenantId == tenantId && e.EstaActivo) // ✅ SEGURIDAD: Filtrado por tenant
                 .ToListAsync();
 
             if (activeEmployees.Count == 0)
@@ -224,53 +477,114 @@ public class PayrollHeadersController : ControllerBase
             decimal totalDeductions = 0;
             decimal totalNetPay = 0;
             decimal totalEmployerCost = 0;
+            decimal totalEmployerCss = 0;
+            decimal totalEmployerSe = 0;
+            decimal totalRiskInsurance = 0;
 
+            // Las horas extra de la cuadrícula se ponen al día con lo que el
+            // director tiene aprobado ahora (pudo decidir después de crearla).
+            await _horasService.SincronizarHorasExtraAsync(payrollHeader);
+            await _context.SaveChangesAsync();
+
+            // Obtener horas registradas para esta planilla (si existen)
+            var employeeHoursMap = await _context.PayrollEmployeeHours
+                .Where(h => h.PayrollHeaderId == payrollHeader.Id && h.TenantId == tenantId)
+                .ToDictionaryAsync(h => h.EmpleadoId);
+
+            // Una extraordinaria solo calcula a las personas que se eligieron al crearla.
+            if (payrollHeader.EsExtraordinaria)
+            {
+                activeEmployees = activeEmployees.Where(e => employeeHoursMap.ContainsKey(e.Id)).ToList();
+                if (activeEmployees.Count == 0)
+                {
+                    await transaction.RollbackAsync();
+                    return BadRequest(new { message = "Esta planilla extraordinaria no tiene a nadie activo para calcular." });
+                }
+            }
+
+            // Licencias de maternidad del período: esos días no se pagan en la
+            // planilla (los paga la CSS). La colaboradora sigue en la planilla,
+            // con una nota con el motivo. La cuadrícula de horas no se toca: si
+            // la licencia se ajusta o se anula, recalcular vuelve a lo correcto.
+            var diasPeriodo = (int)(payrollHeader.PeriodEndDate.Date - payrollHeader.PeriodStartDate.Date).TotalDays + 1;
+            var licencias = await _context.LicenciasMaternidad
+                .Where(l => l.TenantId == tenantId && !l.Anulada
+                         && l.FechaInicio <= payrollHeader.PeriodEndDate && l.FechaFin >= payrollHeader.PeriodStartDate)
+                .ToListAsync();
+            var diasLicencia = licencias
+                .GroupBy(l => l.EmpleadoId)
+                .ToDictionary(g => g.Key, g => Math.Min(diasPeriodo,
+                    g.Sum(l => l.DiasDentro(payrollHeader.PeriodStartDate, payrollHeader.PeriodEndDate))));
+
+            var detailDeduccionPairs = new List<(PayrollDetail detail, DeduccionesResult dedResult)>();
+
+            // DEV-31: Pre-cargar datos compartidos UNA sola vez antes del loop (evita N+1)
+            var employeeIds = activeEmployees.Select(e => e.Id).ToList();
+
+            var taxConfigPreload = await _context.PayrollTaxConfigurations
+                .Where(c => c.IsActive && c.TenantId == tenantId &&
+                            c.EffectiveStartDate <= DateTime.UtcNow &&
+                            (c.EffectiveEndDate == null || c.EffectiveEndDate >= DateTime.UtcNow))
+                .OrderByDescending(c => c.EffectiveStartDate)
+                .FirstOrDefaultAsync();
+            decimal salarioMinimoMensual = taxConfigPreload?.SalarioMinimoLegal ?? 700.00m;
+            decimal salarioMinimoPeriodo = DeduccionPrioridadEngine.ProrratearSalarioMinimo(
+                salarioMinimoMensual, payrollHeader.PayPeriodType);
+
+            var deduccionesMap = (await _context.DeduccionesFijas
+                .Where(d => employeeIds.Contains(d.EmpleadoId) && d.EstaActivo &&
+                            d.FechaInicio <= payrollHeader.PeriodStartDate &&
+                            (d.FechaFin == null || d.FechaFin >= payrollHeader.PeriodStartDate) &&
+                            (d.EstadoOrdenJudicial == null || d.EstadoOrdenJudicial != EstadoOrdenJudicial.Levantada))
+                .OrderBy(d => d.Prioridad)
+                .ToListAsync())
+                .GroupBy(d => d.EmpleadoId)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            var prestamosMap = (await _context.Prestamos
+                .Where(p => employeeIds.Contains(p.EmpleadoId) && p.Estado == EstadoPrestamo.Activo && p.CuotasPagadas < p.NumeroCuotas)
+                .ToListAsync())
+                .GroupBy(p => p.EmpleadoId)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            var anticiposMap = (await _context.Anticipos
+                .Where(a => employeeIds.Contains(a.EmpleadoId) && a.Estado == EstadoAnticipo.Aprobado &&
+                            a.FechaDescuento.Date >= payrollHeader.PeriodStartDate.Date &&
+                            a.FechaDescuento.Date <= payrollHeader.PeriodEndDate.Date)
+                .ToListAsync())
+                .GroupBy(a => a.EmpleadoId)
+                .ToDictionary(g => g.Key, g => g.ToList());
+
+            // DEV-35: Delegar cálculo por empleado al servicio (elimina duplicación con PayrollProcessingService)
             foreach (var employee in activeEmployees)
             {
-                // Calcular usando el orquestador
-                var calculationResult = await _orchestrator.CalculateEmployeePayrollAsync(
-                    companyId: payrollHeader.CompanyId,
-                    grossPay: employee.SalarioBase,
-                    payFrequency: employee.PayFrequency,
-                    yearsCotized: employee.YearsCotized,
-                    averageSalaryLast10Years: employee.AverageSalaryLast10Years,
-                    cssRiskPercentage: employee.CssRiskPercentage,
-                    dependents: employee.Dependents,
-                    isSubjectToCss: employee.IsSubjectToCss,
-                    isSubjectToEducationalInsurance: employee.IsSubjectToEducationalInsurance,
-                    isSubjectToIncomeTax: employee.IsSubjectToIncomeTax,
-                    calculationDate: DateTime.UtcNow
-                );
+                var hoursForEmployee = employeeHoursMap.TryGetValue(employee.Id, out var h) ? h : null;
+                var dfForEmployee = deduccionesMap.TryGetValue(employee.Id, out var dfList) ? dfList : new List<DeduccionFija>();
+                var prForEmployee = prestamosMap.TryGetValue(employee.Id, out var prList) ? prList : new List<Prestamo>();
+                var antForEmployee = anticiposMap.TryGetValue(employee.Id, out var antList) ? antList : new List<Anticipo>();
 
-                // Crear PayrollDetail con los resultados
-                var detail = new PayrollDetail
-                {
-                    PayrollHeaderId = payrollHeader.Id,
-                    EmpleadoId = employee.Id,
-                    GrossPay = calculationResult.GrossPay,
-                    BaseSalary = employee.SalarioBase,
-                    OvertimePay = 0, // TODO: Implementar overtime en futuras fases
-                    Bonuses = 0,
-                    Commissions = 0,
-                    CssEmployee = calculationResult.CssEmployee,
-                    CssEmployer = calculationResult.CssEmployer,
-                    RiskContribution = calculationResult.RiskContribution,
-                    EducationalInsuranceEmployee = calculationResult.EducationalInsuranceEmployee,
-                    EducationalInsuranceEmployer = calculationResult.EducationalInsuranceEmployer,
-                    IncomeTax = calculationResult.IncomeTax,
-                    OtherDeductions = 0,
-                    TotalDeductions = calculationResult.TotalDeductions,
-                    NetPay = calculationResult.NetPay,
-                    EmployerCost = calculationResult.TotalEmployerCost
-                };
+                var conLicencia = diasLicencia.TryGetValue(employee.Id, out var diasSinSalario);
+                var (detail, deduccionesResult) = await _processingService.CalculateFromPreloadedDataAsync(
+                    tenantId, employee, payrollHeader,
+                    hoursForEmployee, dfForEmployee, prForEmployee, antForEmployee,
+                    salarioMinimoPeriodo,
+                    conLicencia ? 1m - (decimal)diasSinSalario / diasPeriodo : 1m);
+                if (conLicencia)
+                    detail.Nota = diasSinSalario == diasPeriodo
+                        ? "Licencia de maternidad: todo el período sin salario en planilla; la CSS paga el subsidio."
+                        : $"Licencia de maternidad: {diasSinSalario} de {diasPeriodo} días sin salario en planilla; la CSS paga el subsidio.";
 
                 _context.PayrollDetails.Add(detail);
+                detailDeduccionPairs.Add((detail, deduccionesResult));
 
                 // Acumular totales
-                totalGrossPay += calculationResult.GrossPay;
-                totalDeductions += calculationResult.TotalDeductions;
-                totalNetPay += calculationResult.NetPay;
-                totalEmployerCost += calculationResult.TotalEmployerCost;
+                totalGrossPay += detail.GrossPay;
+                totalDeductions += detail.TotalDeductions;
+                totalNetPay += detail.NetPay;
+                totalEmployerCost += detail.EmployerCost;
+                totalEmployerCss += detail.CssEmployer;
+                totalEmployerSe += detail.EducationalInsuranceEmployer;
+                totalRiskInsurance += detail.RiskContribution;
             }
 
             // ====================================================================
@@ -280,13 +594,47 @@ public class PayrollHeadersController : ControllerBase
             payrollHeader.TotalDeductions = totalDeductions;
             payrollHeader.TotalNetPay = totalNetPay;
             payrollHeader.TotalEmployerCost = totalEmployerCost;
+            payrollHeader.TotalEmployerCss = totalEmployerCss;
+            payrollHeader.TotalEmployerSe = totalEmployerSe;
+            payrollHeader.TotalRiskInsurance = totalRiskInsurance;
             payrollHeader.Status = PayrollStatus.Calculated;
             payrollHeader.ProcessedDate = DateTime.UtcNow;
-            payrollHeader.ProcessedBy = "system"; // TODO: Obtener del usuario autenticado con ICurrentUserService
+            payrollHeader.ProcessedBy = _tenantContext.UserId ?? "system";
             payrollHeader.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
+
+            // Persistir auditoría de deducciones aplicadas (para reportes de acreedor y prelación)
+            foreach (var (det, dedRes) in detailDeduccionPairs)
+            {
+                await _processingService.CreateDeduccionesAplicadasAsync(det, dedRes);
+            }
+
             await transaction.CommitAsync();
+
+            // ✅ AUDIT LOG: Registrar cálculo de planilla
+            try
+            {
+                await _auditLogService.LogAsync(
+                    "PayrollCalculated",
+                    "PayrollHeader",
+                    id.ToString(),
+                    new Dictionary<string, string>
+                    {
+                        ["PayrollNumber"] = payrollHeader.PayrollNumber,
+                        ["PeriodStart"] = payrollHeader.PeriodStartDate.ToString("yyyy-MM-dd"),
+                        ["PeriodEnd"] = payrollHeader.PeriodEndDate.ToString("yyyy-MM-dd"),
+                        ["TotalEmployees"] = activeEmployees.Count.ToString(),
+                        ["TotalGrossPay"] = totalGrossPay.ToString("N2"),
+                        ["TotalDeductions"] = totalDeductions.ToString("N2"),
+                        ["TotalNetPay"] = totalNetPay.ToString("N2"),
+                        ["TotalEmployerCost"] = totalEmployerCost.ToString("N2")
+                    });
+            }
+            catch (Exception)
+            {
+                // No bloqueamos la operación si falla el audit log
+            }
 
             return Ok(new
             {
@@ -320,12 +668,11 @@ public class PayrollHeadersController : ControllerBase
         {
             await transaction.RollbackAsync();
             logger.LogError(ex, "Unexpected error calculating payroll {PayrollId}: {Message}", id, ex.Message);
-            return StatusCode(500, new {
-                message = "Error al calcular la planilla",
-                detail = ex.Message,
-                innerError = ex.InnerException?.Message,
-                stackTrace = ex.StackTrace?.Split('\n').Take(5).ToArray()
-            });
+            // DEV-33: Solo exponer detalles técnicos en Development, nunca en Production
+            var env = HttpContext.RequestServices.GetRequiredService<IHostEnvironment>();
+            return StatusCode(500, env.IsDevelopment()
+                ? (object)new { message = "Error al calcular la planilla", detail = ex.Message, innerError = ex.InnerException?.Message }
+                : new { message = "Error al calcular la planilla. Consulte los logs del servidor." });
         }
     }
 
@@ -334,10 +681,12 @@ public class PayrollHeadersController : ControllerBase
     /// POST /api/payrollheaders/{id}/approve
     /// </summary>
     [HttpPost("{id}/approve")]
-    [Authorize(Policy = "CanApprovePayroll")]
+    [RequirePermission(SystemPermission.PayrollApprove)]
     public async Task<ActionResult> ApprovePayroll(int id)
     {
-        var payrollHeader = await _context.PayrollHeaders.FindAsync(id);
+        var tenantId = _tenantContext.TenantId;
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
 
         if (payrollHeader == null)
         {
@@ -354,16 +703,66 @@ public class PayrollHeadersController : ControllerBase
             return BadRequest(new { message = ex.Message });
         }
 
+        // Horas extra del período de los empleados de esta planilla.
+        var detallesPorEmpleado = await _context.PayrollDetails
+            .Where(d => d.PayrollHeaderId == id && d.TenantId == tenantId)
+            .Select(d => new { d.EmpleadoId, d.Id })
+            .ToDictionaryAsync(d => d.EmpleadoId, d => d.Id);
+        var empleadosPlanilla = detallesPorEmpleado.Keys.ToList();
+        var horasDelPeriodo = await _context.HorasExtra
+            .Where(h => h.TenantId == tenantId
+                     && empleadosPlanilla.Contains(h.EmpleadoId)
+                     && h.PlanillaDetailId == null
+                     && h.Fecha >= payrollHeader.PeriodStartDate
+                     && h.Fecha <= payrollHeader.PeriodEndDate)
+            .ToListAsync();
+
+        // Si el director decidió algo después del cálculo, la planilla ya no
+        // refleja lo aprobado: hay que recalcular antes de aprobar.
+        var calculadaEn = payrollHeader.ProcessedDate ?? DateTime.MinValue;
+        if (horasDelPeriodo.Any(h => (h.FechaAprobacion ?? DateTime.MinValue) > calculadaEn
+                                  || (h.FechaRechazo ?? DateTime.MinValue) > calculadaEn
+                                  || (h.UpdatedAt ?? DateTime.MinValue) > calculadaEn))
+        {
+            return BadRequest(new { message = "Cambiaron horas extra de este período después de calcular la planilla. Recalcúlala antes de aprobarla." });
+        }
+
+        // Las horas extra aprobadas quedan pagadas en esta planilla: ya no se
+        // pueden cambiar ni volver a entrar en otra del mismo período.
+        foreach (var h in horasDelPeriodo.Where(h => h.EstaAprobada))
+            h.PlanillaDetailId = detallesPorEmpleado[h.EmpleadoId];
+
         // Marcar como aprobada
         payrollHeader.Status = PayrollStatus.Approved;
         payrollHeader.IsApproved = true;
         payrollHeader.ApprovedDate = DateTime.UtcNow;
-        payrollHeader.ApprovedBy = "system"; // TODO: Obtener del usuario autenticado
+        payrollHeader.ApprovedBy = _tenantContext.UserId ?? "system";
         payrollHeader.UpdatedAt = DateTime.UtcNow;
 
         try
         {
             await _context.SaveChangesAsync();
+
+            // ✅ AUDIT LOG: Registrar aprobación de planilla
+            try
+            {
+                await _auditLogService.LogAsync(
+                    "PayrollApproved",
+                    "PayrollHeader",
+                    id.ToString(),
+                    new Dictionary<string, string>
+                    {
+                        ["PayrollNumber"] = payrollHeader.PayrollNumber,
+                        ["TotalNetPay"] = payrollHeader.TotalNetPay.ToString("N2"),
+                        ["ApprovedBy"] = payrollHeader.ApprovedBy ?? "Unknown",
+                        ["ApprovedDate"] = payrollHeader.ApprovedDate?.ToString("yyyy-MM-dd HH:mm") ?? "N/A"
+                    });
+            }
+            catch (Exception)
+            {
+                // No bloqueamos la operación si falla el audit log
+            }
+
             return Ok(new
             {
                 message = "Planilla aprobada exitosamente",
@@ -385,10 +784,12 @@ public class PayrollHeadersController : ControllerBase
     /// NOTA: Stub - integración bancaria pendiente
     /// </summary>
     [HttpPost("{id}/pay")]
-    [Authorize(Policy = "CanPayPayroll")]
-    public async Task<ActionResult> PayPayroll(int id)
+    [RequirePermission(SystemPermission.PayrollApprove)]
+    public async Task<ActionResult> PayPayroll(int id, [FromServices] ILogger<PayrollHeadersController> logger)
     {
-        var payrollHeader = await _context.PayrollHeaders.FindAsync(id);
+        var tenantId = _tenantContext.TenantId;
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
 
         if (payrollHeader == null)
         {
@@ -405,15 +806,72 @@ public class PayrollHeadersController : ControllerBase
             return BadRequest(new { message = ex.Message });
         }
 
-        // TODO: Integración bancaria pendiente
-        return StatusCode(501, new
+        // DEV-25: Marcar planilla como Paid y actualizar estados de préstamos/anticipos
+        await using var payTransaction = await _context.Database.BeginTransactionAsync();
+        try
         {
-            message = "Integración bancaria pendiente",
-            detail = "El endpoint de pago requiere integración con el sistema bancario. " +
-                     "Funcionalidad disponible en próxima fase (Phase E).",
-            payrollHeaderId = payrollHeader.Id,
-            totalNetPay = payrollHeader.TotalNetPay
-        });
+            // 1. Obtener todos los detalles de la planilla
+            var details = await _context.PayrollDetails
+                .Where(d => d.PayrollHeaderId == payrollHeader.Id && d.TenantId == tenantId)
+                .ToListAsync();
+
+            // 2. Para cada detalle, procesar préstamos y anticipos descontados
+            foreach (var detail in details)
+            {
+                // Obtener deducciones aplicadas de esta línea
+                var deducciones = await _context.DeduccionesAplicadas
+                    .Where(d => d.PayrollDetailId == detail.Id)
+                    .ToListAsync();
+
+                var prestamoIds = deducciones
+                    .Where(d => d.PrestamoId.HasValue)
+                    .Select(d => d.PrestamoId!.Value)
+                    .Distinct()
+                    .ToList();
+
+                var montoAplicadoPorPrestamo = deducciones
+                    .Where(d => d.PrestamoId.HasValue && d.MontoAplicado > 0m)
+                    .GroupBy(d => d.PrestamoId!.Value)
+                    .ToDictionary(g => g.Key, g => g.Sum(x => x.MontoAplicado));
+
+                // Solo procesar anticipos que realmente tuvieron monto descontado
+                var anticipoIds = deducciones
+                    .Where(d => d.AnticipoId.HasValue && d.MontoAplicado > 0m)
+                    .Select(d => d.AnticipoId!.Value)
+                    .Distinct()
+                    .ToList();
+
+                if (prestamoIds.Count > 0)
+                    await _processingService.ProcessPrestamosAsync(prestamoIds, detail.Id, payrollHeader.Id, montoAplicadoPorPrestamo);
+
+                if (anticipoIds.Count > 0)
+                    await _processingService.ProcessAnticiposAsync(anticipoIds, detail.Id, payrollHeader.Id);
+            }
+
+            // 3. Marcar planilla como Pagada
+            payrollHeader.Status = PayrollStatus.Paid;
+            payrollHeader.UpdatedAt = DateTime.UtcNow;
+            _context.PayrollHeaders.Update(payrollHeader);
+            await _context.SaveChangesAsync();
+
+            await payTransaction.CommitAsync();
+
+            return Ok(new
+            {
+                message = "Planilla marcada como pagada y préstamos/anticipos actualizados",
+                payrollHeaderId = payrollHeader.Id,
+                totalNetPay = payrollHeader.TotalNetPay
+            });
+        }
+        catch (Exception ex)
+        {
+            await payTransaction.RollbackAsync();
+            var env = HttpContext.RequestServices.GetRequiredService<IHostEnvironment>();
+            logger.LogError(ex, "Error marking payroll {PayrollId} as paid", id);
+            return StatusCode(500, env.IsDevelopment()
+                ? (object)new { message = "Error al marcar la planilla como pagada", detail = ex.Message }
+                : new { message = "Error al marcar la planilla como pagada. Consulte los logs del servidor." });
+        }
     }
 
     /// <summary>
@@ -421,10 +879,12 @@ public class PayrollHeadersController : ControllerBase
     /// POST /api/payrollheaders/{id}/cancel
     /// </summary>
     [HttpPost("{id}/cancel")]
-    [Authorize(Policy = "CanCancelPayroll")]
-    public async Task<ActionResult> CancelPayroll(int id)
+    [RequirePermission(SystemPermission.PayrollApprove)]
+    public async Task<ActionResult> CancelPayroll(int id, [FromBody] CancelPayrollRequest? request = null)
     {
-        var payrollHeader = await _context.PayrollHeaders.FindAsync(id);
+        var tenantId = _tenantContext.TenantId;
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
 
         if (payrollHeader == null)
         {
@@ -441,13 +901,47 @@ public class PayrollHeadersController : ControllerBase
             return BadRequest(new { message = ex.Message });
         }
 
+        // Las horas extra que esta planilla daba por pagadas vuelven a estar
+        // aprobadas y sin pagar, listas para la planilla que la reemplace.
+        var detalleIds = await _context.PayrollDetails
+            .Where(d => d.PayrollHeaderId == id && d.TenantId == tenantId)
+            .Select(d => d.Id)
+            .ToListAsync();
+        var horasPagadas = await _context.HorasExtra
+            .Where(h => h.TenantId == tenantId && h.PlanillaDetailId != null && detalleIds.Contains(h.PlanillaDetailId.Value))
+            .ToListAsync();
+        foreach (var h in horasPagadas)
+            h.PlanillaDetailId = null;
+
         // Marcar como cancelada
+        var estadoAnterior = payrollHeader.Status;
         payrollHeader.Status = PayrollStatus.Cancelled;
         payrollHeader.UpdatedAt = DateTime.UtcNow;
 
         try
         {
             await _context.SaveChangesAsync();
+
+            // ✅ AUDIT LOG: Registrar cancelación de planilla
+            try
+            {
+                await _auditLogService.LogAsync(
+                    "PayrollCancelled",
+                    "PayrollHeader",
+                    id.ToString(),
+                    new Dictionary<string, string>
+                    {
+                        ["PayrollNumber"] = payrollHeader.PayrollNumber,
+                        ["PreviousStatus"] = estadoAnterior.ToString(),
+                        ["CancelledDate"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm"),
+                        ["Reason"] = request?.Reason ?? string.Empty
+                    });
+            }
+            catch (Exception)
+            {
+                // No bloqueamos la operación si falla el audit log
+            }
+
             return Ok(new
             {
                 message = "Planilla cancelada exitosamente",
@@ -460,15 +954,635 @@ public class PayrollHeadersController : ControllerBase
             return Conflict(new { message = "La planilla fue modificada por otro usuario. Por favor, recargue e intente nuevamente." });
         }
     }
+
+    // ====================================================================
+    // ENDPOINTS DE HORAS TRABAJADAS
+    // ====================================================================
+
+    /// <summary>
+    /// Obtiene las horas registradas para todos los empleados de una planilla.
+    /// GET /api/payrollheaders/{id}/hours
+    /// </summary>
+    [HttpGet("{id}/hours")]
+    [RequirePermission(SystemPermission.PayrollView)]
+    public async Task<ActionResult> GetPayrollHours(int id, [FromQuery] int? page = null, [FromQuery] int? size = null, [FromQuery] string? q = null)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
+
+        if (payrollHeader == null)
+            return NotFound(new { message = $"Planilla con ID {id} no encontrada" });
+
+        var consulta = _context.PayrollEmployeeHours
+            .Where(h => h.PayrollHeaderId == id && h.TenantId == tenantId)
+            .AsNoTracking();
+
+        // Búsqueda por nombre, apellido o cédula (para miles de empleados).
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var texto = q.Trim().ToLower();
+            consulta = consulta.Where(h =>
+                (h.Empleado!.Nombre + " " + h.Empleado.Apellido).ToLower().Contains(texto)
+                || h.Empleado.NumeroIdentificacion.ToLower().Contains(texto));
+        }
+
+        var proyeccion = consulta
+            .OrderBy(h => h.Empleado!.Apellido).ThenBy(h => h.Empleado!.Nombre).ThenBy(h => h.EmpleadoId)
+            .Select(h => new
+            {
+                h.Id, h.EmpleadoId,
+                empleado = new { h.Empleado!.Id, h.Empleado.Nombre, h.Empleado.Apellido, h.Empleado.NumeroIdentificacion },
+                h.RegularHours, h.SundayHours, h.HolidayHours,
+                h.OvertimeDayHours, h.OvertimeNightHours, h.OvertimeHolidayHours, h.OvertimeMixedHours, h.OvertimeExcessHours,
+                h.AbsenceHours, h.DisabilityHours, h.Commissions,
+            });
+
+        // Sin página: la lista completa, como siempre (compatibilidad).
+        if (page is null) return Ok(await proyeccion.ToListAsync());
+
+        var pagina = Math.Max(1, page.Value);
+        var tamano = Math.Clamp(size ?? 50, 1, 500);
+        var total = await consulta.CountAsync();
+        var items = await proyeccion.Skip((pagina - 1) * tamano).Take(tamano).ToListAsync();
+        return Ok(new { items, total, page = pagina, size = tamano });
+    }
+
+    /// <summary>
+    /// Empleados de una planilla, paginados y con búsqueda. Es lo que enseña
+    /// la planilla desplegada; con miles de empleados no se mandan todos juntos.
+    /// GET /api/payrollheaders/{id}/details?page=1&amp;size=50&amp;q=perez
+    /// </summary>
+    [HttpGet("{id}/details")]
+    [RequirePermission(SystemPermission.PayrollView, SystemPermission.PayrollViewSelf)]
+    public async Task<ActionResult> GetPayrollDetails(int id, [FromQuery] int page = 1, [FromQuery] int size = 50, [FromQuery] string? q = null)
+    {
+        var tenantId = _tenantContext.TenantId;
+        var linkedEmployeeId = _currentUserService.GetLinkedEmployeeId();
+
+        var existe = await _context.PayrollHeaders.AnyAsync(p => p.Id == id && p.TenantId == tenantId);
+        if (!existe) return NotFound(new { message = $"Planilla con ID {id} no encontrada" });
+
+        var consulta = _context.PayrollDetails
+            .Where(d => d.PayrollHeaderId == id && d.TenantId == tenantId)
+            .AsNoTracking();
+
+        if (linkedEmployeeId.HasValue)
+            consulta = consulta.Where(d => d.EmpleadoId == linkedEmployeeId.Value);
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var texto = q.Trim().ToLower();
+            consulta = consulta.Where(d =>
+                (d.Empleado!.Nombre + " " + d.Empleado.Apellido).ToLower().Contains(texto)
+                || d.Empleado.NumeroIdentificacion.ToLower().Contains(texto));
+        }
+
+        var pagina = Math.Max(1, page);
+        var tamano = Math.Clamp(size, 1, 500);
+        var total = await consulta.CountAsync();
+
+        // Totales y columnas opcionales de TODA la planilla (no solo de la página).
+        var totales = await consulta
+            .GroupBy(_ => 1)
+            .Select(g => new
+            {
+                bruto = g.Sum(d => d.GrossPay),
+                css = g.Sum(d => d.CssEmployee),
+                se = g.Sum(d => d.EducationalInsuranceEmployee),
+                isr = g.Sum(d => d.IncomeTax),
+                pension = g.Sum(d => d.PensionAlimenticia),
+                embargos = g.Sum(d => d.Embargos),
+                fijas = g.Sum(d => d.DeduccionesFijas),
+                prestamos = g.Sum(d => d.Prestamos),
+                anticipos = g.Sum(d => d.Anticipos),
+                deducciones = g.Sum(d => d.TotalDeductions),
+                neto = g.Sum(d => d.NetPay),
+            })
+            .FirstOrDefaultAsync();
+
+        var items = await consulta
+            .OrderBy(d => d.Empleado!.Apellido).ThenBy(d => d.Empleado!.Nombre).ThenBy(d => d.Id)
+            .Skip((pagina - 1) * tamano).Take(tamano)
+            .Select(d => new
+            {
+                d.Id, d.EmpleadoId,
+                empleado = new { d.Empleado!.Id, d.Empleado.Nombre, d.Empleado.Apellido, d.Empleado.NumeroIdentificacion },
+                d.GrossPay, d.CssEmployee, d.EducationalInsuranceEmployee, d.IncomeTax,
+                d.PensionAlimenticia, d.Embargos, d.DeduccionesFijas, d.Prestamos, d.Anticipos,
+                d.TotalDeductions, d.NetPay, d.TuvoLimitacionSalarioMinimo, d.Nota,
+            })
+            .ToListAsync();
+
+        return Ok(new { items, total, page = pagina, size = tamano, totales });
+    }
+
+    /// <summary>
+    /// Registra/actualiza las horas de un empleado en una planilla específica.
+    /// PUT /api/payrollheaders/{payrollId}/hours/{empleadoId}
+    /// </summary>
+    [HttpPut("{payrollId}/hours/{empleadoId}")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<ActionResult> UpsertEmployeeHours(
+        int payrollId, int empleadoId, [FromBody] UpsertEmployeeHoursRequest request)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == payrollId && p.TenantId == tenantId);
+
+        if (payrollHeader == null)
+            return NotFound(new { message = $"Planilla con ID {payrollId} no encontrada" });
+
+        if (payrollHeader.Status != PayrollStatus.Draft && payrollHeader.Status != PayrollStatus.Calculated)
+            return BadRequest(new { message = "Solo se pueden modificar horas en planillas con estado Draft o Calculated" });
+
+        var employee = await _context.Empleados
+            .FirstOrDefaultAsync(e => e.Id == empleadoId && e.TenantId == tenantId);
+
+        if (employee == null)
+            return NotFound(new { message = $"Empleado con ID {empleadoId} no encontrado" });
+
+        var existing = await _context.PayrollEmployeeHours
+            .FirstOrDefaultAsync(h => h.PayrollHeaderId == payrollId && h.EmpleadoId == empleadoId && h.TenantId == tenantId);
+
+        if (existing != null)
+        {
+            existing.RegularHours = request.RegularHours;
+            existing.SundayHours = request.SundayHours;
+            existing.HolidayHours = request.HolidayHours;
+            existing.OvertimeDayHours = request.OvertimeDayHours;
+            existing.OvertimeNightHours = request.OvertimeNightHours;
+            existing.OvertimeHolidayHours = request.OvertimeHolidayHours;
+            existing.OvertimeMixedHours = request.OvertimeMixedHours;
+            existing.OvertimeExcessHours = request.OvertimeExcessHours;
+            existing.AbsenceHours = request.AbsenceHours;
+            existing.DisabilityHours = request.DisabilityHours;
+            existing.Commissions = request.Commissions;
+            existing.UpdatedAt = DateTime.UtcNow;
+        }
+        else
+        {
+            var newHours = new PayrollEmployeeHours
+            {
+                PayrollHeaderId = payrollId,
+                EmpleadoId = empleadoId,
+                TenantId = tenantId,
+                RegularHours = request.RegularHours,
+                SundayHours = request.SundayHours,
+                HolidayHours = request.HolidayHours,
+                OvertimeDayHours = request.OvertimeDayHours,
+                OvertimeNightHours = request.OvertimeNightHours,
+                OvertimeHolidayHours = request.OvertimeHolidayHours,
+                OvertimeMixedHours = request.OvertimeMixedHours,
+                OvertimeExcessHours = request.OvertimeExcessHours,
+                AbsenceHours = request.AbsenceHours,
+                DisabilityHours = request.DisabilityHours,
+                Commissions = request.Commissions
+            };
+            _context.PayrollEmployeeHours.Add(newHours);
+        }
+
+        await _context.SaveChangesAsync();
+        return Ok(new { message = "Horas registradas exitosamente" });
+    }
+
+    /// <summary>
+    /// Auto-genera horas regulares default para todos los empleados activos.
+    /// POST /api/payrollheaders/{id}/hours/generate-defaults
+    /// </summary>
+    [HttpPost("{id}/hours/generate-defaults")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<ActionResult> GenerateDefaultHours(int id)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
+
+        if (payrollHeader == null)
+            return NotFound(new { message = $"Planilla con ID {id} no encontrada" });
+
+        if (payrollHeader.Status != PayrollStatus.Draft && payrollHeader.Status != PayrollStatus.Calculated)
+            return BadRequest(new { message = "Solo se pueden generar horas en planillas con estado Draft o Calculated" });
+
+        var generated = await _horasService.GenerarHorasPorDefectoAsync(payrollHeader);
+        await _context.SaveChangesAsync();
+        return Ok(new { message = $"Horas generadas para {generated} empleados", generated });
+    }
+
+    /// <summary>
+    /// Importa horas extra y ausencias aprobadas del período a PayrollEmployeeHours.
+    /// POST /api/payrollheaders/{id}/hours/import-novedades?mode=overwrite|sum
+    /// </summary>
+    [HttpPost("{id}/hours/import-novedades")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<ActionResult> ImportNovedades(int id, [FromQuery] string mode = "overwrite")
+    {
+        var tenantId = _tenantContext.TenantId;
+        var modo = (mode ?? "overwrite").ToLowerInvariant() switch
+        {
+            "sum" => ModoNovedades.Sumar,
+            "ask" => ModoNovedades.Preguntar,
+            _ => ModoNovedades.Sobrescribir,
+        };
+
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
+
+        if (payrollHeader == null)
+            return NotFound(new { message = $"Planilla con ID {id} no encontrada" });
+
+        if (payrollHeader.Status != PayrollStatus.Draft && payrollHeader.Status != PayrollStatus.Calculated)
+            return BadRequest(new { message = "Solo se pueden importar novedades en planillas con estado Draft o Calculated" });
+
+        var r = await _horasService.ImportarNovedadesAsync(payrollHeader, modo);
+        if (r.RequiereConfirmacion)
+        {
+            return Ok(new
+            {
+                requiresConfirmation = true,
+                employeesWithExistingValues = r.EmpleadosConValoresPrevios,
+                message = $"Hay {r.EmpleadosConValoresPrevios} empleado(s) con horas extra/ausencias ya registradas. ¿Desea sobrescribir o sumar?"
+            });
+        }
+
+        await _context.SaveChangesAsync();
+        return Ok(new
+        {
+            requiresConfirmation = false,
+            message = $"Importadas {r.HorasExtra:F1} horas extra y {r.HorasAusencia:F1} horas de ausencias de {r.EmpleadosConNovedades} empleado(s)",
+            summary = new
+            {
+                employeesProcessed = r.EmpleadosConNovedades,
+                overtimeDayHours = r.HorasExtraDiurnas,
+                overtimeNightHours = r.HorasExtraNocturnas,
+                absenceHours = r.HorasAusencia,
+                totalOvertimeHours = r.HorasExtra
+            }
+        });
+    }
+
+    /// <summary>
+    /// Obtiene el desglose detallado de deducciones aplicadas para un detalle de planilla.
+    /// GET /api/payrollheaders/{id}/details/{detailId}/deducciones
+    /// </summary>
+    [HttpGet("{id}/details/{detailId}/deducciones")]
+    [RequirePermission(SystemPermission.PayrollView)]
+    public async Task<ActionResult> GetDeduccionesDeDetalle(int id, int detailId)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var detail = await _context.PayrollDetails
+            .Where(d => d.Id == detailId && d.PayrollHeaderId == id && d.TenantId == tenantId)
+            .FirstOrDefaultAsync();
+
+        if (detail == null)
+            return NotFound(new { message = "Detalle de planilla no encontrado" });
+
+        var deducciones = await _context.DeduccionesAplicadas
+            .Where(da => da.PayrollDetailId == detailId && da.TenantId == tenantId)
+            .OrderBy(da => da.OrdenAplicacion)
+            .AsNoTracking()
+            .ToListAsync();
+
+        return Ok(new
+        {
+            payrollDetailId = detailId,
+            salarioMinimoAplicado = detail.SalarioMinimoLegalAplicado,
+            tuvoLimitacion = detail.TuvoLimitacionSalarioMinimo,
+            montoLimitadoTotal = detail.MontoLimitadoPorSalarioMinimo,
+            deducciones = deducciones.Select(da => new
+            {
+                da.Id,
+                da.OrdenAplicacion,
+                categoria = da.Categoria.ToString(),
+                da.TipoDeduccion,
+                da.Descripcion,
+                da.NombreAcreedor,
+                da.MontoSolicitado,
+                da.MontoAplicado,
+                da.MontoLimitado,
+                da.RazonLimitacion,
+                da.SaldoDisponibleAntes,
+                da.SaldoDisponibleDespues,
+                da.FechaTransferencia,
+                da.ReferenciaTransferencia
+            })
+        });
+    }
+
+    /// <summary>
+    /// Marca la transferencia de una deducción aplicada a su acreedor.
+    /// PUT /api/payrollheaders/deducciones-aplicadas/{id}/transferencia
+    /// </summary>
+    [HttpPut("deducciones-aplicadas/{deduccionAplicadaId}/transferencia")]
+    [RequirePermission(SystemPermission.PayrollApprove)]
+    public async Task<ActionResult> MarcarTransferencia(int deduccionAplicadaId, [FromBody] MarcarTransferenciaRequest request)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var deduccionAplicada = await _context.DeduccionesAplicadas
+            .FirstOrDefaultAsync(da => da.Id == deduccionAplicadaId && da.TenantId == tenantId);
+
+        if (deduccionAplicada == null)
+            return NotFound(new { message = "Deduccion aplicada no encontrada" });
+
+        deduccionAplicada.FechaTransferencia = DateTime.SpecifyKind(request.FechaTransferencia, DateTimeKind.Utc);
+        deduccionAplicada.ReferenciaTransferencia = request.ReferenciaTransferencia;
+
+        await _context.SaveChangesAsync();
+        return Ok(new { message = "Transferencia registrada exitosamente" });
+    }
+
+    /// <summary>
+    /// Asegura que el tenant tenga configuración de impuestos (CSS, SE, ISR). Si no existe, crea la configuración por defecto.
+    /// Útil cuando "Calcular Planilla" falla por falta de configuración (p. ej. empresa creada antes de tener seed al arrancar).
+    /// POST /api/payrollheaders/ensure-tax-config
+    /// </summary>
+    [HttpPost("ensure-tax-config")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<ActionResult> EnsureTaxConfig([FromServices] ILogger<PayrollHeadersController> logger)
+    {
+        var tenantId = _tenantContext.TenantId;
+        if (tenantId <= 0)
+            return BadRequest(new { message = "No se pudo determinar el tenant" });
+        try
+        {
+            await PayrollConfigSeeder.SeedForNewTenantAsync(_context, tenantId, logger);
+            return Ok(new { message = "Configuración de planilla verificada o creada correctamente" });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "EnsureTaxConfig failed for tenant {TenantId}", tenantId);
+            return StatusCode(500, new { message = "No se pudo crear la configuración. Contacte al administrador." });
+        }
+    }
+
+    /// <summary>
+    /// Elimina una planilla completamente (cualquier estado).
+    /// Para planillas con cálculos (Calculated/Approved/Paid): revierte el estado
+    /// de préstamos y anticipos antes de borrar para mantener la integridad de datos.
+    /// Las cascadas EF Core eliminan PayrollDetails, DeduccionesAplicadas y PayrollEmployeeHours.
+    /// DELETE /api/payrollheaders/{id}
+    /// </summary>
+    [HttpDelete("{id}")]
+    [RequirePermission(SystemPermission.PayrollDelete)]
+    public async Task<IActionResult> Delete(int id)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var payrollHeader = await _context.PayrollHeaders
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId);
+
+        if (payrollHeader == null)
+            return NotFound(new { message = "Planilla no encontrada." });
+
+        // Solo revertir préstamos y anticipos si la planilla fue efectivamente pagada
+        // (es cuando ProcessPrestamosAsync/ProcessAnticiposAsync realmente modificaron los saldos)
+        if (payrollHeader.Status == PayrollStatus.Paid)
+        {
+            var payrollDetailIds = await _context.PayrollDetails
+                .Where(pd => pd.PayrollHeaderId == id)
+                .Select(pd => pd.Id)
+                .ToListAsync();
+
+            var deduccionesAplicadas = await _context.DeduccionesAplicadas
+                .Where(d => d.TenantId == tenantId && payrollDetailIds.Contains(d.PayrollDetailId))
+                .ToListAsync();
+
+            // Revertir préstamos
+            var prestamoIds = deduccionesAplicadas
+                .Where(d => d.PrestamoId != null && d.MontoAplicado > 0m)
+                .Select(d => d.PrestamoId!.Value)
+                .Distinct()
+                .ToList();
+
+            if (prestamoIds.Any())
+            {
+                // Eliminar PagoPrestamo vinculados a esta planilla antes de revertir saldos
+                var pagosARevertir = await _context.PagosPrestamos
+                    .Where(p => p.PlanillaDetailId.HasValue && payrollDetailIds.Contains(p.PlanillaDetailId.Value))
+                    .ToListAsync();
+                _context.PagosPrestamos.RemoveRange(pagosARevertir);
+
+                var prestamos = await _context.Prestamos
+                    .Where(p => prestamoIds.Contains(p.Id) && p.TenantId == tenantId)
+                    .ToListAsync();
+
+                foreach (var prestamo in prestamos)
+                {
+                    var montoRevertir = deduccionesAplicadas
+                        .Where(d => d.PrestamoId == prestamo.Id && d.MontoAplicado > 0m)
+                        .Sum(d => d.MontoAplicado);
+                    prestamo.MontoPendiente += montoRevertir;
+                    if (prestamo.CuotasPagadas > 0)
+                        prestamo.CuotasPagadas -= 1;
+                    // Si estaba marcado como Pagado, reactivar
+                    if (prestamo.Estado == EstadoPrestamo.Pagado)
+                        prestamo.Estado = EstadoPrestamo.Activo;
+                }
+            }
+
+            // Revertir anticipos a Aprobado (estaban aprobados antes de ser descontados)
+            var anticipoIds = deduccionesAplicadas
+                .Where(d => d.AnticipoId != null && d.MontoAplicado > 0m)
+                .Select(d => d.AnticipoId!.Value)
+                .Distinct()
+                .ToList();
+
+            if (anticipoIds.Any())
+            {
+                var anticipos = await _context.Anticipos
+                    .Where(a => anticipoIds.Contains(a.Id) && a.TenantId == tenantId)
+                    .ToListAsync();
+
+                foreach (var anticipo in anticipos)
+                {
+                    anticipo.Estado = EstadoAnticipo.Aprobado;
+                }
+            }
+        }
+
+        _context.PayrollHeaders.Remove(payrollHeader);
+        await _context.SaveChangesAsync();
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Retorna el desglose detallado del cálculo de planilla para un empleado específico.
+    /// GET /api/payrollheaders/{id}/details/{detailId}/breakdown
+    /// </summary>
+    [HttpGet("{id}/details/{detailId}/breakdown")]
+    [RequirePermission(SystemPermission.PayrollView, SystemPermission.PayrollViewSelf)]
+    public async Task<ActionResult<PayrollBreakdownDto>> GetDetailBreakdown(int id, int detailId)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var detail = await _context.PayrollDetails
+            .Include(d => d.DeduccionesAplicadas)
+            .Include(d => d.PayrollHeader)
+            .FirstOrDefaultAsync(d => d.Id == detailId && d.PayrollHeaderId == id && d.TenantId == tenantId);
+
+        if (detail == null)
+            return NotFound(new { message = "Detalle no encontrado" });
+
+        // Cargar horas del empleado para este período
+        var horasEmpleado = await _context.PayrollEmployeeHours
+            .FirstOrDefaultAsync(h => h.PayrollHeaderId == id && h.EmpleadoId == detail.EmpleadoId && h.TenantId == tenantId);
+
+        // --- Ingresos ---
+        var ingresos = new IngresosBreakdown(
+            SalarioBase: detail.BaseSalary,
+            HorasRegulares: horasEmpleado?.RegularPay ?? detail.BaseSalary,
+            HorasDomingo: horasEmpleado?.SundayPay ?? 0,
+            HorasFeriado: horasEmpleado?.HolidayPay ?? 0,
+            HorasExtraDiurnas: horasEmpleado?.OvertimeDayPay ?? 0,
+            HorasExtraNocturnas: horasEmpleado?.OvertimeNightPay ?? 0,
+            HorasExtraFestivos: horasEmpleado?.OvertimeHolidayPay ?? 0,
+            HorasExtraMixtas: horasEmpleado?.OvertimeMixedPay ?? 0,
+            HorasExtraExceso: horasEmpleado?.OvertimeExcessPay ?? 0,
+            Comisiones: detail.Commissions,
+            Bonos: detail.Bonuses,
+            GrossPay: detail.GrossPay
+        );
+
+        // --- CSS ---
+        // Derivar base usada: si se aplicó tope, cssBase < grossPay
+        decimal cssBase = detail.CssEmployee > 0 ? Math.Round(detail.CssEmployee / PayrollConstants.CssTasaEmpleado, 2) : detail.GrossPay;
+        bool seAplicoTope = cssBase < detail.GrossPay - 0.01m;
+
+        var css = new CssBreakdownDto(
+            BaseUsada: cssBase,
+            TopeSalarial: seAplicoTope ? cssBase : 0,
+            SeAplicoTope: seAplicoTope,
+            Tasa: PayrollConstants.CssTasaEmpleado * 100,
+            Monto: detail.CssEmployee
+        );
+
+        // --- Seguro Educativo ---
+        var se = new SeBreakdownDto(
+            Base: detail.GrossPay,
+            Tasa: 1.25m,
+            Monto: detail.EducationalInsuranceEmployee
+        );
+
+        // --- ISR: el mismo camino del motor acumulativo, para que el número
+        //     coincida con la fila de la ficha anual del empleado ---
+        var payPeriodType = detail.PayrollHeader?.PayPeriodType ?? Vorluno.Planilla.Domain.Enums.PayPeriodType.Quincenal;
+        var anioFiscal = (detail.PayrollHeader?.PeriodEndDate ?? DateTime.UtcNow).Year;
+        var acumuladoAnterior = await _acumuladoFiscalService.ObtenerAcumuladoAsync(
+            detail.EmpleadoId, anioFiscal, excluirPayrollHeaderId: id);
+        var numeroPeriodo = await _acumuladoFiscalService.ObtenerNumeroPeriodoAsync(
+            detail.EmpleadoId, anioFiscal, excluirPayrollHeaderId: id);
+
+        var gastoRepresentacion = Math.Min(detail.GastoRepresentacion, detail.GrossPay);
+        var gravablePeriodo = detail.GrossPay - gastoRepresentacion;
+        var movimientos = new List<Vorluno.Planilla.Application.Services.MovimientoIsr>
+        {
+            new(Vorluno.Planilla.Domain.Enums.TratamientoIsr.GravableAcumulable, gravablePeriodo)
+        };
+        if (gastoRepresentacion > 0m)
+            movimientos.Add(new(Vorluno.Planilla.Domain.Enums.TratamientoIsr.GastoRepresentacion, gastoRepresentacion));
+
+        var motor = Vorluno.Planilla.Application.Services.MotorIsrPanama.Calcular(
+            new Vorluno.Planilla.Application.Services.CorridaIsr
+            {
+                Frecuencia = payPeriodType,
+                NumeroPeriodoEmpleado = numeroPeriodo,
+                AcumuladoAnterior = acumuladoAnterior,
+                Movimientos = movimientos
+            });
+
+        var periodosDePago = Vorluno.Planilla.Application.Services.MotorIsrPanama.ObtenerPeriodosEquivalentesAnuales(payPeriodType);
+        var tieneSaldo = acumuladoAnterior.IsrRetenidoInicial > 0m || acumuladoAnterior.DecimoInicial > 0m || acumuladoAnterior.IngresoGravableInicial > 0m;
+        var tieneImportados = await _context.DevengadosMensuales.AnyAsync(d => d.EmpleadoId == detail.EmpleadoId && d.Anio == anioFiscal);
+
+        var isr = new IsrBreakdownDto(
+            IngresoGravablePeriodo: gravablePeriodo,
+            NumeroPeriodo: numeroPeriodo,
+            PeriodoEquivalente: motor.PeriodoEquivalente,
+            PeriodosDePago: Math.Round(periodosDePago, 2),
+            Acumulado: motor.IngresoGravableAcumulado + motor.DecimoAcumulado,
+            IngresoAnualProyectado: motor.IngresoAnualProyectado,
+            RentaAnual: motor.IsrAnualProyectado,
+            RentaPorPeriodo: Math.Round(motor.IsrAnualProyectado / periodosDePago, 2, MidpointRounding.AwayFromZero),
+            ImpuestoCausado: motor.IsrDebidoAcumulado,
+            RetenidoAntes: motor.IsrRetenidoTotalAnterior,
+            ADescontar: motor.IsrDescontarPeriodo,
+            GastoRepresentacion: gastoRepresentacion,
+            IsrGastoRepresentacion: motor.IsrGastoRepresentacionPeriodo,
+            IsrPeriodo: detail.IncomeTax,
+            TieneSaldoInicial: tieneSaldo,
+            TieneMesesImportados: tieneImportados
+        );
+
+        // --- Acreedores ---
+        var acreedores = detail.DeduccionesAplicadas
+            .OrderBy(d => d.OrdenAplicacion)
+            .Select(d => new AcreedorItemDto(
+                Descripcion: d.Descripcion,
+                Categoria: d.Categoria.ToString(),
+                MontoSolicitado: d.MontoSolicitado,
+                MontoAplicado: d.MontoAplicado,
+                FueLimitado: d.MontoLimitado > 0,
+                RazonLimitacion: d.RazonLimitacion
+            ))
+            .ToList();
+
+        var breakdown = new PayrollBreakdownDto(
+            Ingresos: ingresos,
+            Css: css,
+            Se: se,
+            Isr: isr,
+            Acreedores: acreedores,
+            TotalDeducciones: detail.TotalDeductions,
+            NetPay: detail.NetPay
+        );
+
+        return Ok(breakdown);
+    }
 }
 
 /// <summary>
 /// DTO para crear una nueva planilla.
 /// </summary>
+/// <summary>Motivo de anulación, para auditoría.</summary>
+public record CancelPayrollRequest(string? Reason);
+
 public record CreatePayrollHeaderRequest(
-    int CompanyId,
-    string PayrollNumber,
+    string? PayrollNumber,
     DateTime PeriodStartDate,
     DateTime PeriodEndDate,
-    DateTime PayDate
+    // Opcional: cada empresa paga cuando quiere y la fecha de pago no define
+    // nada en el cálculo. Si no viene, se usa el fin del período.
+    DateTime? PayDate = null,
+    PayPeriodType PayPeriodType = PayPeriodType.Quincenal,
+    TipoPlanilla TipoPlanilla = TipoPlanilla.Regular,
+    // Extraordinaria: solo para estas personas (las que se quedaron fuera).
+    bool EsExtraordinaria = false,
+    List<int>? EmpleadoIds = null
+);
+
+public record VerificarExtraordinariaRequest(DateTime PeriodStartDate, DateTime PeriodEndDate, List<int> EmpleadoIds);
+
+public record UpsertEmployeeHoursRequest(
+    decimal RegularHours,
+    decimal SundayHours = 0,
+    decimal HolidayHours = 0,
+    decimal OvertimeDayHours = 0,
+    decimal OvertimeNightHours = 0,
+    decimal OvertimeHolidayHours = 0,
+    decimal OvertimeMixedHours = 0,
+    decimal OvertimeExcessHours = 0,
+    decimal AbsenceHours = 0,
+    decimal DisabilityHours = 0,
+    decimal Commissions = 0
+);
+
+public record MarcarTransferenciaRequest(
+    DateTime FechaTransferencia,
+    string? ReferenciaTransferencia
 );

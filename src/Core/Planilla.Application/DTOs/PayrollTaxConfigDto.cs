@@ -5,7 +5,7 @@
 // Descripción: DTO de configuración de tasas para servicios de cálculo
 // ====================================================================
 
-namespace Planilla.Application.DTOs;
+namespace Vorluno.Planilla.Application.DTOs;
 
 /// <summary>
 /// DTO de configuración de tasas e impuestos de planilla.
@@ -13,7 +13,7 @@ namespace Planilla.Application.DTOs;
 /// </summary>
 public record PayrollTaxConfigDto(
     int Id,
-    int CompanyId,
+    int TenantId,
     DateTime EffectiveStartDate,
     DateTime? EffectiveEndDate,
 
@@ -39,5 +39,8 @@ public record PayrollTaxConfigDto(
 
     // Deducciones ISR
     decimal DependentDeductionAmount,
-    int MaxDependents
+    int MaxDependents,
+
+    // DEV-28: Salario mínimo legal vigente (varía por sector — Decreto Ejecutivo 74 de 2023)
+    decimal SalarioMinimoLegal
 );

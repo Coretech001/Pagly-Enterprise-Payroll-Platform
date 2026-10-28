@@ -1,16 +1,21 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa una solicitud de vacaciones de un empleado
 /// </summary>
-public class SolicitudVacaciones
+public class SolicitudVacaciones : ITenantEntity
 {
     public int Id { get; set; }
     public int EmpleadoId { get; set; }
     public Empleado Empleado { get; set; } = null!;
-    public int CompanyId { get; set; }
+
+    /// <summary>
+    /// ID del tenant al que pertenece esta solicitud
+    /// </summary>
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Fecha de inicio de las vacaciones
@@ -74,7 +79,26 @@ public class SolicitudVacaciones
 
     public string? Observaciones { get; set; }
 
+    // ====================================================================
+    // Salario vacacional calculado (DEV-42)
+    // ====================================================================
+
+    /// <summary>Salario diario vacacional promedio usado para el cálculo</summary>
+    public decimal? SalarioVacacional { get; set; }
+
+    /// <summary>Monto total a pagar por las vacaciones (SalarioVacacional × DiasVacaciones)</summary>
+    public decimal? MontoVacaciones { get; set; }
+
+    /// <summary>Inicio del período de referencia usado para el promedio salarial</summary>
+    public DateTime? PeriodoReferenciaDesde { get; set; }
+
+    /// <summary>Fin del período de referencia usado para el promedio salarial</summary>
+    public DateTime? PeriodoReferenciaHasta { get; set; }
+
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

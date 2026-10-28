@@ -7,10 +7,10 @@
 // ====================================================================
 
 using FluentAssertions;
-using Planilla.Application.Services;
-using Planilla.Application.Tests.Helpers;
+using Vorluno.Planilla.Application.Services;
+using Vorluno.Planilla.Application.Tests.Helpers;
 
-namespace Planilla.Application.Tests.Services;
+namespace Vorluno.Planilla.Application.Tests.Services;
 
 /// <summary>
 /// Tests unitarios del servicio de cálculo CSS (Caja de Seguro Social).
@@ -22,7 +22,7 @@ public class CssCalculationServiceTests
     private readonly DateTime _calculationDate = new(2025, 1, 15);
 
     [Fact]
-    public async Task CalculateEmployeeCss__TopeEstandar__ReturnsCorrectAmount()
+    public async Task CalculateEmployeeCss__SalarioSobre1500__CotizaSobreElSueldoCompleto()
     {
         // Arrange
         var mockProvider = new MockPayrollConfigProvider();
@@ -37,6 +37,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -44,15 +45,15 @@ public class CssCalculationServiceTests
         );
 
         // Assert
-        result.ContributionBase.Should().Be(1500m);
-        result.MaxContributionBase.Should().Be(1500m);
+        // Ley 51/2005 Art. 96.1: 9.75 % de SUS SUELDOS, sin tope de cotizacion.
+        result.ContributionBase.Should().Be(1800m);
         result.TipoTope.Should().Be("Estándar");
         result.Rate.Should().Be(9.75m);
-        result.Amount.Should().Be(146.25m); // 1500 * 9.75% = 146.25
+        result.Amount.Should().Be(175.50m); // 1800 * 9.75% = 175.50
     }
 
     [Fact]
-    public async Task CalculateEmployeeCss__TopeIntermedio__ReturnsCorrectAmount()
+    public async Task CalculateEmployeeCss__SalarioSobre2000__CotizaSobreElSueldoCompleto()
     {
         // Arrange
         var mockProvider = new MockPayrollConfigProvider();
@@ -67,6 +68,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -74,15 +76,14 @@ public class CssCalculationServiceTests
         );
 
         // Assert
-        result.ContributionBase.Should().Be(2000m);
-        result.MaxContributionBase.Should().Be(2000m);
+        result.ContributionBase.Should().Be(2500m);
         result.TipoTope.Should().Be("Intermedio");
         result.Rate.Should().Be(9.75m);
-        result.Amount.Should().Be(195.00m); // 2000 * 9.75% = 195.00
+        result.Amount.Should().Be(243.75m); // 2500 * 9.75% = 243.75
     }
 
     [Fact]
-    public async Task CalculateEmployeeCss__TopeAlto__ReturnsCorrectAmount()
+    public async Task CalculateEmployeeCss__SalarioSobre2500__CotizaSobreElSueldoCompleto()
     {
         // Arrange
         var mockProvider = new MockPayrollConfigProvider();
@@ -97,6 +98,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -104,11 +106,10 @@ public class CssCalculationServiceTests
         );
 
         // Assert
-        result.ContributionBase.Should().Be(2500m);
-        result.MaxContributionBase.Should().Be(2500m);
+        result.ContributionBase.Should().Be(3000m);
         result.TipoTope.Should().Be("Alto");
         result.Rate.Should().Be(9.75m);
-        result.Amount.Should().Be(243.75m); // 2500 * 9.75% = 243.75
+        result.Amount.Should().Be(292.50m); // 3000 * 9.75% = 292.50
     }
 
     [Fact]
@@ -127,6 +128,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployerCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -137,6 +139,59 @@ public class CssCalculationServiceTests
         result.ContributionBase.Should().Be(1500m);
         result.Rate.Should().Be(13.25m); // Tasa base 2025
         result.Amount.Should().Be(198.75m); // 1500 * 13.25% = 198.75
+    }
+
+    [Fact]
+    public async Task CalculateEmployerCss__SalarioSobre1500__CotizaSobreElSueldoCompleto()
+    {
+        // Ley 51/2005 Art. 96.2.a: 13.25 % de LOS SUELDOS QUE PAGUEN, sin tope.
+        var mockProvider = new MockPayrollConfigProvider();
+        var service = new CssCalculationServicePortable(mockProvider);
+
+        var result = await service.CalculateEmployerCssAsync(
+            DefaultCompanyId,
+            grossPay: 2000m,
+            payFrequency: "Mensual",
+            yearsCotized: 10,
+            averageSalaryLast10Years: 1200m,
+            isSubjectToCss: true,
+            calculationDate: _calculationDate
+        );
+
+        result.ContributionBase.Should().Be(2000m);
+        result.Rate.Should().Be(13.25m);
+        result.Amount.Should().Be(265.00m); // 2000 * 13.25% = 265.00
+    }
+
+    // ====================================================================
+    // CSS por frecuencia de pago no-mensual
+    // La cuota se calcula sobre el bruto del periodo, sin prorratear ningun tope.
+    // ====================================================================
+
+    [Theory]
+    [InlineData("Quincenal", 900.00,  87.75)]  // 900 * 9.75% = 87.75
+    [InlineData("Bisemanal", 800.00,  78.00)]  // 800 * 9.75% = 78.00
+    [InlineData("Semanal",   400.00,  39.00)]  // 400 * 9.75% = 39.00
+    public async Task CalculateEmployeeCss__CualquierFrecuencia__CotizaSobreElBrutoDelPeriodo(
+        string payFrequency, decimal grossPay, decimal expectedAmount)
+    {
+        var mockProvider = new MockPayrollConfigProvider();
+        var service = new CssCalculationServicePortable(mockProvider);
+
+        var result = await service.CalculateEmployeeCssAsync(
+            DefaultCompanyId,
+            grossPay,
+            payFrequency,
+            yearsCotized: 10,
+            averageSalaryLast10Years: 1200m,
+            isSubjectToCss: true,
+            calculationDate: _calculationDate
+        );
+
+        result.ContributionBase.Should().Be(grossPay);
+        result.TipoTope.Should().Be("Estándar");
+        result.Rate.Should().Be(9.75m);
+        result.Amount.Should().Be(expectedAmount);
     }
 
     [Theory]
@@ -161,8 +216,6 @@ public class CssCalculationServiceTests
         var (amount, rate) = await service.CalculateRiskContributionAsync(
             DefaultCompanyId,
             grossPay,
-            yearsCotized,
-            avgSalary,
             cssRiskPercentage,
             isSubject,
             _calculationDate
@@ -189,6 +242,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -219,6 +273,7 @@ public class CssCalculationServiceTests
         Func<Task> act = async () => await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,
@@ -228,6 +283,27 @@ public class CssCalculationServiceTests
         // Assert
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*No se encontró configuración de CSS*");
+    }
+
+    [Fact]
+    public async Task CalculateRiskContribution__NegativeRate__ThrowsInvalidOperationException()
+    {
+        // Arrange
+        var mockProvider = new MockPayrollConfigProvider();
+        var service = new CssCalculationServicePortable(mockProvider);
+
+        // Act
+        Func<Task> act = async () => await service.CalculateRiskContributionAsync(
+            DefaultCompanyId,
+            grossPay: 1500m,
+            cssRiskPercentage: -1m, // tasa inválida
+            isSubjectToCss: true,
+            calculationDate: _calculationDate
+        );
+
+        // Assert
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*CssRiskPercentage no puede ser negativo*");
     }
 
     [Fact]
@@ -246,6 +322,7 @@ public class CssCalculationServiceTests
         var result = await service.CalculateEmployeeCssAsync(
             DefaultCompanyId,
             grossPay,
+            "Mensual",
             yearsCotized,
             avgSalary,
             isSubject,

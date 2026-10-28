@@ -1,9 +1,11 @@
-namespace Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Interfaces;
+
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa un pago individual de una cuota de préstamo (historial).
 /// </summary>
-public class PagoPrestamo
+public class PagoPrestamo : ITenantEntity
 {
     public int Id { get; set; }
 
@@ -12,6 +14,11 @@ public class PagoPrestamo
     /// </summary>
     public int PrestamoId { get; set; }
     public Prestamo Prestamo { get; set; } = null!;
+
+    /// <summary>
+    /// ID del tenant al que pertenece este pago
+    /// </summary>
+    public int TenantId { get; set; }
 
     /// <summary>
     /// ID del detalle de planilla donde se descontó (si aplica)
@@ -50,4 +57,7 @@ public class PagoPrestamo
 
     // Auditoría
     public DateTime CreatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

@@ -1,26 +1,34 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Planilla.Application.DTOs;
-using Planilla.Application.Interfaces;
-using Planilla.Domain.Entities;
-using Planilla.Infrastructure.Data;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Helpers;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Infrastructure.Data;
+using Vorluno.Planilla.Web.Authorization;
+using Vorluno.Planilla.Web.Extensions;
 
-namespace Planilla.Web.Controllers;
+namespace Vorluno.Planilla.Web.Controllers;
 
 /// <summary>
 /// Controlador de API para gestionar anticipos de salario.
 /// </summary>
+[Authorize]
 [ApiController]
 [Route("api/[controller]")]
 public class AnticiposController : ControllerBase
 {
     private readonly IUnitOfWork _unitOfWork;
     private readonly ApplicationDbContext _context;
+    private readonly ITenantContext _tenantContext;
 
-    public AnticiposController(IUnitOfWork unitOfWork, ApplicationDbContext context)
+    public AnticiposController(IUnitOfWork unitOfWork, ApplicationDbContext context, ITenantContext tenantContext)
     {
         _unitOfWork = unitOfWork;
         _context = context;
+        _tenantContext = tenantContext;
     }
 
     /// <summary>
@@ -30,11 +38,13 @@ public class AnticiposController : ControllerBase
     /// <param name="estado">Filtrar por estado (opcional).</param>
     /// <returns>Lista de anticipos.</returns>
     [HttpGet]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> GetAll([FromQuery] int? empleadoId, [FromQuery] EstadoAnticipo? estado)
     {
+        var tenantId = _tenantContext.TenantId;
         var query = _context.Anticipos
+            .Where(a => a.TenantId == tenantId)
             .Include(a => a.Empleado)
-            .Where(a => a.CompanyId == 1)
             .AsQueryable();
 
         if (empleadoId.HasValue)
@@ -47,7 +57,7 @@ public class AnticiposController : ControllerBase
             query = query.Where(a => a.Estado == estado.Value);
         }
 
-        var anticipos = await query.OrderByDescending(a => a.FechaSolicitud).ToListAsync();
+        var anticipos = await query.AsNoTracking().OrderByDescending(a => a.FechaSolicitud).ToListAsync();
         var anticiposDto = anticipos.Select(MapToDto);
 
         return Ok(anticiposDto);
@@ -59,11 +69,15 @@ public class AnticiposController : ControllerBase
     /// <param name="id">ID del anticipo.</param>
     /// <returns>Detalles del anticipo.</returns>
     [HttpGet("{id}")]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> GetById(int id)
     {
+        var tenantId = _tenantContext.TenantId;
         var anticipo = await _context.Anticipos
+            .Where(a => a.Id == id && a.TenantId == tenantId)
             .Include(a => a.Empleado)
-            .FirstOrDefaultAsync(a => a.Id == id && a.CompanyId == 1);
+            .AsNoTracking()
+            .FirstOrDefaultAsync();
 
         if (anticipo == null)
         {
@@ -79,11 +93,14 @@ public class AnticiposController : ControllerBase
     /// </summary>
     /// <returns>Lista de anticipos pendientes.</returns>
     [HttpGet("pendientes")]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> GetPendientes()
     {
+        var tenantId = _tenantContext.TenantId;
         var anticipos = await _context.Anticipos
+            .Where(a => a.TenantId == tenantId && a.Estado == EstadoAnticipo.Pendiente)
             .Include(a => a.Empleado)
-            .Where(a => a.CompanyId == 1 && a.Estado == EstadoAnticipo.Pendiente)
+            .AsNoTracking()
             .OrderBy(a => a.FechaSolicitud)
             .ToListAsync();
 
@@ -97,10 +114,14 @@ public class AnticiposController : ControllerBase
     /// <param name="request">Datos del anticipo a crear.</param>
     /// <returns>Anticipo creado.</returns>
     [HttpPost]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> Create(CreateAnticipoRequest request)
     {
+        var tenantId = _tenantContext.TenantId;
+
         // Validar empleado existe
-        var empleado = await _unitOfWork.Empleados.GetByIdAsync(request.EmpleadoId);
+        var empleado = await _context.Empleados
+            .FirstOrDefaultAsync(e => e.Id == request.EmpleadoId && e.TenantId == tenantId);
         if (empleado == null)
         {
             return BadRequest(new { message = "Empleado no encontrado" });
@@ -117,7 +138,8 @@ public class AnticiposController : ControllerBase
             return BadRequest(new { message = "El motivo es requerido" });
         }
 
-        if (request.FechaDescuento < DateTime.Today)
+        // Solo Owner puede registrar anticipos con fecha pasada (ingreso retroactivo)
+        if (request.FechaDescuento < DateTime.Today && !this.HasAnyRole(TenantRole.Owner))
         {
             return BadRequest(new { message = "La fecha de descuento no puede ser anterior a hoy" });
         }
@@ -125,7 +147,7 @@ public class AnticiposController : ControllerBase
         // Verificar que no tenga anticipos pendientes o aprobados sin descontar
         var anticiposPendientes = await _context.Anticipos
             .Where(a => a.EmpleadoId == request.EmpleadoId &&
-                       a.CompanyId == 1 &&
+                       a.TenantId == tenantId &&
                        (a.Estado == EstadoAnticipo.Pendiente || a.Estado == EstadoAnticipo.Aprobado))
             .AnyAsync();
 
@@ -136,8 +158,8 @@ public class AnticiposController : ControllerBase
 
         var anticipo = new Anticipo
         {
+            TenantId = tenantId,
             EmpleadoId = request.EmpleadoId,
-            CompanyId = 1,
             Monto = request.Monto,
             FechaSolicitud = DateTime.UtcNow,
             FechaDescuento = request.FechaDescuento,
@@ -166,10 +188,12 @@ public class AnticiposController : ControllerBase
     /// <param name="request">Datos de aprobación (aprobador).</param>
     /// <returns>NoContent si fue exitoso.</returns>
     [HttpPost("{id}/aprobar")]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> Aprobar(int id, [FromBody] AprobarAnticipoRequest request)
     {
+        var tenantId = _tenantContext.TenantId;
         var anticipo = await _context.Anticipos
-            .FirstOrDefaultAsync(a => a.Id == id && a.CompanyId == 1);
+            .FirstOrDefaultAsync(a => a.Id == id && a.TenantId == tenantId);
 
         if (anticipo == null)
         {
@@ -197,10 +221,12 @@ public class AnticiposController : ControllerBase
     /// <param name="request">Datos de rechazo (motivo).</param>
     /// <returns>NoContent si fue exitoso.</returns>
     [HttpPost("{id}/rechazar")]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> Rechazar(int id, [FromBody] RechazarAnticipoRequest request)
     {
+        var tenantId = _tenantContext.TenantId;
         var anticipo = await _context.Anticipos
-            .FirstOrDefaultAsync(a => a.Id == id && a.CompanyId == 1);
+            .FirstOrDefaultAsync(a => a.Id == id && a.TenantId == tenantId);
 
         if (anticipo == null)
         {
@@ -226,10 +252,12 @@ public class AnticiposController : ControllerBase
     /// <param name="id">ID del anticipo.</param>
     /// <returns>NoContent si fue exitoso.</returns>
     [HttpDelete("{id}/cancelar")]
+    [RequirePermission(SystemPermission.AdvancesManage)]
     public async Task<IActionResult> Cancelar(int id)
     {
+        var tenantId = _tenantContext.TenantId;
         var anticipo = await _context.Anticipos
-            .FirstOrDefaultAsync(a => a.Id == id && a.CompanyId == 1);
+            .FirstOrDefaultAsync(a => a.Id == id && a.TenantId == tenantId);
 
         if (anticipo == null)
         {
@@ -266,27 +294,12 @@ public class AnticiposController : ControllerBase
             FechaAprobacion: anticipo.FechaAprobacion,
             FechaDescuento: anticipo.FechaDescuento,
             Estado: anticipo.Estado,
-            EstadoNombre: GetEstadoNombre(anticipo.Estado),
+            EstadoNombre: anticipo.Estado.ToNombre(),
             Motivo: anticipo.Motivo,
             AprobadoPor: anticipo.AprobadoPor
         );
     }
 
-    /// <summary>
-    /// Obtiene el nombre legible del estado del anticipo.
-    /// </summary>
-    private static string GetEstadoNombre(EstadoAnticipo estado)
-    {
-        return estado switch
-        {
-            EstadoAnticipo.Pendiente => "Pendiente",
-            EstadoAnticipo.Aprobado => "Aprobado",
-            EstadoAnticipo.Descontado => "Descontado",
-            EstadoAnticipo.Rechazado => "Rechazado",
-            EstadoAnticipo.Cancelado => "Cancelado",
-            _ => estado.ToString()
-        };
-    }
 }
 
 /// <summary>

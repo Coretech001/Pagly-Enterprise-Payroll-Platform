@@ -7,23 +7,24 @@
 // ====================================================================
 
 using System.ComponentModel.DataAnnotations;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Configuración de tasas e impuestos de planilla con vigencia temporal.
 /// Maneja tasas escalonadas de CSS según Ley 462 de Panamá.
 /// </summary>
-public class PayrollTaxConfiguration
+public class PayrollTaxConfiguration : ITenantEntity
 {
     [Key]
     public int Id { get; set; }
 
     /// <summary>
-    /// ID de la empresa/compañía a la que aplica esta configuración
+    /// ID del tenant al que pertenece esta configuración
     /// </summary>
     [Required]
-    public int CompanyId { get; set; }
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Fecha de inicio de vigencia de esta configuración
@@ -53,29 +54,31 @@ public class PayrollTaxConfiguration
 
     /// <summary>
     /// Tasa base de aporte CSS del empleador.
-    /// Escalonada según Ley 462: 13.25% → 14.25% → 15.25%
+    /// Escalonada según Reforma CSS: hasta feb. 2027: 13.25% → mar. 2027-feb. 2029: 14.25% → desde mar. 2029: 15.25%
     /// </summary>
     [Required]
     [Range(0, 100)]
     public decimal CssEmployerBaseRate { get; set; }
 
-    /// <summary>
-    /// Tasa de riesgo profesional bajo (0.56%)
-    /// </summary>
+    // Primas de riesgo profesional. La Caja de Seguro Social clasifica a cada
+    // empleador en una clase según su actividad económica y le asigna la prima
+    // correspondiente (Acuerdo N°2 de 1995): I 0.56, II 0.98, III 2.10, IV 3.64
+    // y V 5.67. No es una tasa que la empresa elija.
+    //
+    // Estos tres campos guardan las clases I, III y V como referencia; el valor
+    // que se cobra sale de CssRiskPercentage del empleado.
+
+    /// <summary>Prima de riesgo profesional, Clase I — 0.56% (oficinas, administración, comercio).</summary>
     [Required]
     [Range(0, 100)]
     public decimal CssRiskRateLow { get; set; }
 
-    /// <summary>
-    /// Tasa de riesgo profesional medio (2.50%)
-    /// </summary>
+    /// <summary>Prima de riesgo profesional, Clase III — 2.10% (transporte, manufactura).</summary>
     [Required]
     [Range(0, 100)]
     public decimal CssRiskRateMedium { get; set; }
 
-    /// <summary>
-    /// Tasa de riesgo profesional alto (5.39%)
-    /// </summary>
+    /// <summary>Prima de riesgo profesional, Clase V — 5.67% (construcción, maquinaria, minería).</summary>
     [Required]
     [Range(0, 100)]
     public decimal CssRiskRateHigh { get; set; }
@@ -167,6 +170,20 @@ public class PayrollTaxConfiguration
     [Range(0, int.MaxValue)]
     public int MaxDependents { get; set; }
 
+    // ========== SALARIO MÍNIMO LEGAL ==========
+
+    /// <summary>
+    /// Salario mínimo mensual legal vigente (para protección de deducciones)
+    /// </summary>
+    [Range(0, double.MaxValue)]
+    public decimal SalarioMinimoLegal { get; set; } = 700.00m;
+
+    /// <summary>
+    /// Descripción de la actividad económica del tenant (para determinar salario mínimo aplicable)
+    /// </summary>
+    [MaxLength(300)]
+    public string? ActividadEconomica { get; set; }
+
     /// <summary>
     /// Indica si esta configuración está activa
     /// </summary>
@@ -185,4 +202,7 @@ public class PayrollTaxConfiguration
     /// Fecha de última actualización del registro
     /// </summary>
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

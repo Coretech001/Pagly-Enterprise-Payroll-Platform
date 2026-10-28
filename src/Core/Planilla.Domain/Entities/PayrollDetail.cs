@@ -10,14 +10,15 @@
 // ====================================================================
 
 using System.ComponentModel.DataAnnotations;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Detalle de planilla que representa el cálculo de nómina de un empleado en un período.
 /// Almacena todos los ingresos, deducciones y costos patronales calculados.
 /// </summary>
-public class PayrollDetail
+public class PayrollDetail : ITenantEntity
 {
     /// <summary>
     /// ID único del detalle.
@@ -33,6 +34,11 @@ public class PayrollDetail
     /// ID del empleado al que corresponde este cálculo.
     /// </summary>
     public int EmpleadoId { get; set; }
+
+    /// <summary>
+    /// ID del tenant al que pertenece este detalle de planilla
+    /// </summary>
+    public int TenantId { get; set; }
 
     // ====================================================================
     // Ingresos (componentes del salario bruto)
@@ -76,7 +82,7 @@ public class PayrollDetail
 
     /// <summary>
     /// Aporte CSS del empleador (costo patronal).
-    /// Tasa escalonada: 13.25% / 14.25% / 15.25% según período.
+    /// Tasa escalonada según Reforma CSS: hasta feb. 2027: 13.25% / mar. 2027-feb. 2029: 14.25% / desde mar. 2029: 15.25%.
     /// </summary>
     public decimal CssEmployer { get; set; }
 
@@ -119,6 +125,16 @@ public class PayrollDetail
     /// <summary>
     /// Otras deducciones (préstamos, embargos, seguros privados, etc.).
     /// </summary>
+    /// <summary>
+    /// Gasto de representación pagado en el período. Va dentro de GrossPay porque
+    /// para la Caja de Seguro Social es salario, pero se guarda aparte porque el
+    /// impuesto sobre la renta lo grava con tarifa propia.
+    /// </summary>
+    public decimal GastoRepresentacion { get; set; }
+
+    /// <summary>Retención de renta sobre el gasto de representación, ya incluida en IncomeTax.</summary>
+    public decimal IsrGastoRepresentacion { get; set; }
+
     public decimal OtherDeductions { get; set; }
 
     /// <summary>
@@ -137,9 +153,45 @@ public class PayrollDetail
     public decimal Anticipos { get; set; }
 
     /// <summary>
+    /// Total de pensiones alimenticias aplicadas en este período
+    /// </summary>
+    public decimal PensionAlimenticia { get; set; }
+
+    /// <summary>
+    /// Total de embargos judiciales aplicados en este período
+    /// </summary>
+    public decimal Embargos { get; set; }
+
+    /// <summary>
+    /// Total de deducciones voluntarias aplicadas en este período
+    /// </summary>
+    public decimal DeduccionesVoluntarias { get; set; }
+
+    /// <summary>
+    /// Salario mínimo legal del período usado para protección
+    /// </summary>
+    public decimal SalarioMinimoLegalAplicado { get; set; }
+
+    /// <summary>
+    /// Total de montos limitados por protección de salario mínimo
+    /// </summary>
+    public decimal MontoLimitadoPorSalarioMinimo { get; set; }
+
+    /// <summary>
+    /// Indica si alguna deducción fue limitada por salario mínimo
+    /// </summary>
+    public bool TuvoLimitacionSalarioMinimo { get; set; }
+
+    /// <summary>
     /// Desglose detallado de otras deducciones en formato JSON (opcional)
     /// </summary>
     public string? OtrasDeduccionesDetalle { get; set; }
+
+    /// <summary>
+    /// Por qué esta fila es distinta, en palabras del producto (por ejemplo,
+    /// días de licencia de maternidad sin salario). Se ve en la planilla.
+    /// </summary>
+    public string? Nota { get; set; }
 
     // ====================================================================
     // Asistencia: Horas Extra
@@ -164,6 +216,17 @@ public class PayrollDetail
     /// Monto total por horas extra
     /// </summary>
     public decimal MontoHorasExtra { get; set; }
+
+    /// <summary>
+    /// Horas extra con exceso (3ra/9na semana — Art. 48 Código de Trabajo).
+    /// Se aplica recargo adicional 1.75x cuando se exceden 3h/día o 9h/semana.
+    /// </summary>
+    public decimal HorasExtraExceso { get; set; }
+
+    /// <summary>
+    /// Monto pagado por horas extra con exceso (factor 2.1875x = 1.25 × 1.75).
+    /// </summary>
+    public decimal MontoHorasExtraExceso { get; set; }
 
     // ====================================================================
     // Asistencia: Ausencias
@@ -199,7 +262,8 @@ public class PayrollDetail
 
     /// <summary>
     /// Total de deducciones al empleado.
-    /// Suma de: CssEmployee + EducationalInsuranceEmployee + IncomeTax + OtherDeductions + DeduccionesFijas + Prestamos + Anticipos.
+    /// Suma de: CssEmployee + EducationalInsuranceEmployee + IncomeTax + OtherDeductions + DeduccionesFijas + Prestamos + Anticipos + PensionAlimenticia + Embargos + DeduccionesVoluntarias.
+    /// Nota: MontoHorasExtraExceso NO es una deducción — es un ingreso adicional incluido en GrossPay/OvertimePay.
     /// </summary>
     public decimal TotalDeductions { get; set; }
 
@@ -241,4 +305,14 @@ public class PayrollDetail
     /// Empleado al que corresponde este cálculo.
     /// </summary>
     public virtual Empleado? Empleado { get; set; }
+
+    /// <summary>
+    /// Tenant al que pertenece este detalle
+    /// </summary>
+    public virtual Tenant? Tenant { get; set; }
+
+    /// <summary>
+    /// Deducciones aplicadas con auditoría detallada
+    /// </summary>
+    public virtual ICollection<DeduccionAplicada> DeduccionesAplicadas { get; set; } = new List<DeduccionAplicada>();
 }

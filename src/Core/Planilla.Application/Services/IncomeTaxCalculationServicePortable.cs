@@ -12,13 +12,13 @@
 //   - Lanza PayrollConfigurationException si faltan brackets
 // ====================================================================
 
-using Planilla.Application.DTOs;
-using Planilla.Application.Exceptions;
-using Planilla.Application.Helpers;
-using Planilla.Application.Interfaces;
-using Planilla.Application.Results;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Exceptions;
+using Vorluno.Planilla.Application.Helpers;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.Results;
 
-namespace Planilla.Application.Services;
+namespace Vorluno.Planilla.Application.Services;
 
 /// <summary>
 /// Servicio de cálculo de Impuesto Sobre la Renta (ISR).
@@ -41,6 +41,10 @@ public class IncomeTaxCalculationServicePortable
     /// <param name="payFrequency">Frecuencia de pago (Mensual, Quincenal, Semanal)</param>
     /// <param name="dependents">Número de dependientes declarados</param>
     /// <param name="isSubjectToIncomeTax">Indica si el empleado está sujeto a ISR</param>
+    /// <param name="isSubjectToEducationalInsurance">
+    /// Indica si el empleado cotiza Seguro Educativo. Su contribución (1.25%) es deducible
+    /// de la base imponible del ISR según el Art. 709 numeral 4 del Código Fiscal.
+    /// </param>
     /// <param name="calculationDate">Fecha de cálculo (para determinar año fiscal)</param>
     /// <returns>Resultado del cálculo ISR</returns>
     public async Task<IncomeTaxResult> CalculateIncomeTaxAsync(
@@ -49,6 +53,7 @@ public class IncomeTaxCalculationServicePortable
         string payFrequency,
         int dependents,
         bool isSubjectToIncomeTax,
+        bool isSubjectToEducationalInsurance,
         DateTime calculationDate)
     {
         // Si no está sujeto a ISR, retorna ceros
@@ -57,6 +62,7 @@ public class IncomeTaxCalculationServicePortable
             return new IncomeTaxResult(
                 TaxableIncome: 0,
                 DependentDeduction: 0,
+                SeDeduction: 0,
                 NetTaxableIncome: 0,
                 TaxAmount: 0,
                 EffectiveTaxRate: 0
@@ -65,63 +71,10 @@ public class IncomeTaxCalculationServicePortable
 
         var year = calculationDate.Year;
 
-        // 1. Proyectar ingreso anual basado en la frecuencia de pago
+        // 1. Proyectar ingreso anual basado en la frecuencia de pago (incluye décimo, ×13)
         var annualIncome = ProjectAnnualIncome(grossPay, payFrequency);
 
-        // 2. Calcular deducción por dependientes
-        var dependentDeduction = await CalculateDependentDeductionAsync(
-            companyId, dependents, calculationDate);
-
-        // 3. Calcular ingreso neto gravable (después de deducciones)
-        var netTaxableIncome = Math.Max(0, annualIncome - dependentDeduction);
-
-        // 4. Aplicar brackets progresivos de ISR
-        var annualTax = await ApplyTaxBracketsAsync(companyId, netTaxableIncome, year);
-
-        // 5. Convertir impuesto anual a retención del período
-        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
-        var periodTax = RoundingPolicy.Round(annualTax / periodsPerYear, 2);
-
-        // 6. Calcular tasa efectiva de impuesto
-        var effectiveTaxRate = annualIncome > 0
-            ? RoundingPolicy.Round((annualTax / annualIncome) * 100, 2)
-            : 0;
-
-        return new IncomeTaxResult(
-            TaxableIncome: annualIncome,
-            DependentDeduction: dependentDeduction,
-            NetTaxableIncome: netTaxableIncome,
-            TaxAmount: periodTax,
-            EffectiveTaxRate: effectiveTaxRate
-        );
-    }
-
-    /// <summary>
-    /// Proyecta el ingreso anual basado en el salario del período y la frecuencia de pago.
-    /// </summary>
-    /// <param name="periodIncome">Salario del período</param>
-    /// <param name="payFrequency">Frecuencia de pago (Mensual, Quincenal, Semanal)</param>
-    /// <returns>Ingreso anual proyectado</returns>
-    private decimal ProjectAnnualIncome(decimal periodIncome, string payFrequency)
-    {
-        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
-        return periodIncome * periodsPerYear;
-    }
-
-    /// <summary>
-    /// Calcula la deducción total por dependientes.
-    /// Limita el número de dependientes al máximo permitido por configuración.
-    /// </summary>
-    /// <param name="companyId">ID de compañía</param>
-    /// <param name="dependents">Número de dependientes declarados</param>
-    /// <param name="calculationDate">Fecha de cálculo</param>
-    /// <returns>Deducción total por dependientes</returns>
-    private async Task<decimal> CalculateDependentDeductionAsync(
-        int companyId,
-        int dependents,
-        DateTime calculationDate)
-    {
-        // Obtener configuración de deducciones
+        // 2. Obtener configuración vigente (tasas y deducciones)
         var config = await _configProvider.GetTaxConfigAsync(companyId, calculationDate);
         if (config == null)
         {
@@ -129,13 +82,69 @@ public class IncomeTaxCalculationServicePortable
                 $"No se encontró configuración de ISR para companyId={companyId} en fecha {calculationDate:yyyy-MM-dd}");
         }
 
-        // Limitar dependientes al máximo permitido
-        var validDependents = Math.Min(dependents, config.MaxDependents);
+        // 3. Deducciones del Art. 709 del Código Fiscal que la retención de planilla aplica
+        //    ANTES de la tarifa del Art. 700 (Art. 704: numerales 1, 2, 3 y 4 del Art. 709):
+        //      - Núm. 3: deducción por dependientes.
+        //      - Núm. 4: "Las contribuciones al Seguro Educativo" (1.25% del empleado),
+        //        deducible solo si el empleado cotiza Seguro Educativo.
+        //    La CSS del empleado NO figura en el Art. 709 ⇒ NO se descuenta de la base del ISR.
+        // La deducción básica de B/. 800 (Art. 709 núm. 2, mod. Art. 25 Ley 8/2010) es por
+        // PAREJA en declaración conjunta, no por dependiente, y no se aplica en la retención
+        // de planilla: el empleador no puede saber si la pareja declarará en conjunta, y si
+        // luego no lo hicieran la retención quedaría corta con la contingencia a cargo de la
+        // empresa. Se ajusta en la declaración anual del trabajador.
+        var dependentDeduction = 0m;
 
-        // Calcular deducción total
-        var deduction = validDependents * config.DependentDeductionAmount;
+        // El Seguro Educativo TAMPOCO se deduce de la base del ISR.
+        // El numeral 4 del Art. 709 fue modificado por el Art. 24 de la Ley 8 de 2010, que
+        // eliminó esa deducción; el instructivo vigente de la DGI enumera las deducciones
+        // personales y el Seguro Educativo no figura entre ellas. Criterio confirmado por el
+        // contador: "corre por una vía paralela y no resta de la base imponible".
+        //
+        // Tampoco se deduce la cuota de CSS. La base del ISR en la retención de planilla es
+        // el ingreso gravable completo.
+        var seDeduction = 0m;
 
-        return deduction;
+        // 4. Ingreso neto gravable (después de las deducciones del Art. 709).
+        //    Se mantiene el valor exacto (sin redondeo intermedio) para aplicar la tarifa.
+        var netTaxableIncome = Math.Max(0, annualIncome - dependentDeduction - seDeduction);
+
+        // 5. Aplicar brackets progresivos de ISR (Art. 700)
+        var annualTax = await ApplyTaxBracketsAsync(companyId, netTaxableIncome, year);
+
+        // 6. Convertir impuesto anual a retención del período
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
+        var periodTax = RoundingPolicy.Round(annualTax / periodsPerYear, 2);
+
+        // 7. Calcular tasa efectiva de impuesto
+        var effectiveTaxRate = annualIncome > 0
+            ? RoundingPolicy.Round((annualTax / annualIncome) * 100, 2)
+            : 0;
+
+        return new IncomeTaxResult(
+            TaxableIncome: annualIncome,
+            DependentDeduction: dependentDeduction,
+            SeDeduction: RoundingPolicy.Round(seDeduction, 2),
+            NetTaxableIncome: RoundingPolicy.Round(netTaxableIncome, 2),
+            TaxAmount: periodTax,
+            EffectiveTaxRate: effectiveTaxRate
+        );
+    }
+
+    /// <summary>
+    /// Proyecta el ingreso anual basado en el salario del período y la frecuencia de pago.
+    /// Incluye décimo tercer mes en la proyección (×13 meses) para distribuir
+    /// uniformemente la retención de ISR del décimo en todos los períodos de pago.
+    /// </summary>
+    /// <param name="periodIncome">Salario del período</param>
+    /// <param name="payFrequency">Frecuencia de pago (Mensual, Quincenal, Semanal)</param>
+    /// <returns>Ingreso anual proyectado incluyendo décimo tercer mes</returns>
+    private decimal ProjectAnnualIncome(decimal periodIncome, string payFrequency)
+    {
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
+        // Convertir salario del período a mensual, luego proyectar a 13 meses (12 + décimo)
+        var monthlySalary = periodIncome * periodsPerYear / 12m;
+        return monthlySalary * PayrollConstants.MonthsIncludingDecimo;
     }
 
     /// <summary>
@@ -151,11 +160,8 @@ public class IncomeTaxCalculationServicePortable
         decimal taxableIncome,
         int year)
     {
-        // Obtener brackets de ISR activos para el año fiscal
         var brackets = await _configProvider.GetTaxBracketsAsync(companyId, year);
 
-        // CRÍTICO: NO hay fallback silencioso (eliminado de Core360)
-        // Si no existen brackets, la planilla NO puede procesarse
         if (brackets == null || brackets.Count == 0)
         {
             throw new PayrollConfigurationException(
@@ -163,49 +169,29 @@ public class IncomeTaxCalculationServicePortable
                 "Configure los tramos en la tabla TaxBrackets antes de calcular la planilla.");
         }
 
-        // Ordenar brackets por ingreso mínimo (ascendente)
         var orderedBrackets = brackets.OrderBy(b => b.MinIncome).ToList();
 
-        decimal totalTax = 0;
-
+        // Encontrar el tramo aplicable (el último donde MinIncome < taxableIncome)
+        TaxBracketDto? applicableBracket = null;
         foreach (var bracket in orderedBrackets)
         {
-            // Si el ingreso gravable es menor al mínimo del tramo, no aplica
-            if (taxableIncome <= bracket.MinIncome)
-                continue;
-
-            decimal bracketIncome;
-
-            if (bracket.MaxIncome.HasValue)
+            if (taxableIncome > bracket.MinIncome)
             {
-                // Tramo con límite superior
-                if (taxableIncome > bracket.MaxIncome.Value)
-                {
-                    // Ingreso excede el tope del tramo - aplicar tasa al rango completo del tramo
-                    bracketIncome = bracket.MaxIncome.Value - bracket.MinIncome;
-                }
-                else
-                {
-                    // Ingreso cae dentro de este tramo - aplicar tasa al excedente sobre el mínimo
-                    bracketIncome = taxableIncome - bracket.MinIncome;
-                }
+                applicableBracket = bracket;
             }
             else
             {
-                // Último tramo sin límite superior - aplicar tasa al excedente sobre el mínimo
-                bracketIncome = taxableIncome - bracket.MinIncome;
-            }
-
-            // Calcular impuesto del tramo
-            var bracketTax = RoundingPolicy.CalculatePercentage(bracketIncome, bracket.Rate);
-
-            // Agregar impuesto fijo acumulado de tramos anteriores (si aplica)
-            totalTax += bracketTax + bracket.FixedAmount;
-
-            // Si el ingreso cae dentro de este tramo (no lo excede), terminar
-            if (bracket.MaxIncome.HasValue && taxableIncome <= bracket.MaxIncome.Value)
                 break;
+            }
         }
+
+        if (applicableBracket == null)
+            return 0m;
+
+        // ISR = FixedAmount (acumulado de tramos anteriores) + excedente × tasa del tramo
+        var excess = taxableIncome - applicableBracket.MinIncome;
+        var bracketTax = RoundingPolicy.CalculatePercentage(excess, applicableBracket.Rate);
+        var totalTax = applicableBracket.FixedAmount + bracketTax;
 
         return RoundingPolicy.Round(totalTax, 2);
     }

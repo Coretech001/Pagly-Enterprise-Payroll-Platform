@@ -1,0 +1,168 @@
+import { useEffect, useState } from 'react';
+import { Card, CardBody, CardHeader } from '../ui/Card';
+import { Button } from '../ui/Button';
+import { RoleCard } from './RoleCard';
+import { RoleFormModal } from './RoleFormModal';
+import { RolePermissionsModal } from './RolePermissionsModal';
+import ConfirmModal from '../ConfirmModal.tsx';
+import { roleService } from '../../services/roleService';
+import toast from 'react-hot-toast';
+import { Plus, Loader2, Shield, AlertCircle } from 'lucide-react';
+import type { CustomTenantRoleDto } from '../../types/api';
+
+export function RolesTab() {
+  const [roles, setRoles] = useState<CustomTenantRoleDto[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingRole, setEditingRole] = useState<CustomTenantRoleDto | null>(null);
+  const [permissionsRole, setPermissionsRole] = useState<CustomTenantRoleDto | null>(null);
+  const [deletingRole, setDeletingRole] = useState<CustomTenantRoleDto | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  useEffect(() => {
+    loadRoles();
+  }, []);
+
+  const loadRoles = async () => {
+    try {
+      setIsLoading(true);
+      const data = await roleService.getRoles();
+      setRoles(data);
+    } catch (error: any) {
+      toast.error(error.message || 'Error al cargar roles');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deletingRole) return;
+
+    if (deletingRole.userCount > 0) {
+      toast.error('No puedes eliminar un rol que tiene usuarios asignados');
+      setDeletingRole(null);
+      return;
+    }
+
+    try {
+      setIsDeleting(true);
+      await roleService.deleteRole(deletingRole.id);
+      toast.success('Rol eliminado exitosamente');
+      await loadRoles();
+      setDeletingRole(null);
+    } catch (error: any) {
+      toast.error(error.message || 'Error al eliminar rol');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Una sola lista: todos los roles son creados por el Owner
+  const editableRoles = roles.filter((r) => !r.isSystem);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="w-8 h-8 animate-spin text-primary-400" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-end">
+        <Button icon={Plus} onClick={() => setShowCreateModal(true)}>
+          Crear Rol
+        </Button>
+      </div>
+
+      {/* Banner info */}
+      <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4 flex items-start gap-3">
+        <AlertCircle className="w-5 h-5 text-blue-300 flex-shrink-0 mt-0.5" />
+        <div className="flex-1">
+          <p className="text-sm text-blue-300">
+            Crea roles, asígnales permisos y luego asígnalos a los usuarios desde la pestaña Usuarios.
+          </p>
+        </div>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-100">Roles de la empresa</h2>
+            <span className="text-sm text-gray-400">{editableRoles.length} roles</span>
+          </div>
+        </CardHeader>
+        <CardBody>
+          {editableRoles.length === 0 ? (
+            <div className="text-center py-12">
+              <Shield className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-gray-100 mb-2">No hay roles creados</h3>
+              <p className="text-gray-400 mb-4">Crea el primer rol y asígnale permisos.</p>
+              <Button icon={Plus} onClick={() => setShowCreateModal(true)}>
+                Crear primer rol
+              </Button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {editableRoles.map((role) => (
+                <RoleCard
+                  key={role.id}
+                  role={role}
+                  onEditPermissions={setPermissionsRole}
+                  onEdit={setEditingRole}
+                  onDelete={setDeletingRole}
+                />
+              ))}
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      {/* Modals */}
+      <RoleFormModal
+        role={null}
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        onSuccess={() => {
+          loadRoles();
+          setShowCreateModal(false);
+        }}
+      />
+
+      <RoleFormModal
+        role={editingRole}
+        isOpen={!!editingRole}
+        onClose={() => setEditingRole(null)}
+        onSuccess={() => {
+          loadRoles();
+          setEditingRole(null);
+        }}
+      />
+
+      <RolePermissionsModal
+        role={permissionsRole}
+        isOpen={!!permissionsRole}
+        onClose={() => setPermissionsRole(null)}
+        onSuccess={() => {
+          loadRoles();
+          setPermissionsRole(null);
+        }}
+      />
+
+      <ConfirmModal
+        isOpen={!!deletingRole}
+        onClose={() => setDeletingRole(null)}
+        onConfirm={handleDelete}
+        title="Eliminar Rol"
+        message={
+          deletingRole
+            ? `¿Estás seguro de que deseas eliminar el rol "${deletingRole.name}"? Esta acción no se puede deshacer.`
+            : ''
+        }
+        confirmText="Eliminar"
+        isLoading={isDeleting}
+      />
+    </div>
+  );
+}

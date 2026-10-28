@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>aspnet-Planilla.Web-1a0fcdd3-dfba-4b1f-a325-1324652deb75</UserSecretsId>
+
+    <!-- XML documentation para Swagger — permite que SwaggerGen incluya
+         los <summary> de controllers y DTOs en la spec pública /v1/docs. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Warnings de XML docs legacy en otros controllers (HorasExtra, Vacaciones,
+         PlanLimitsAttribute) — son de XML malformados que existen desde antes de
+         habilitar GenerateDocumentationFile. No afectan runtime, son deuda técnica
+         separada del API Platform. Suprimidos para no contaminar el output del build.
+           CS1570: XML malformado.
+           CS1573: Parámetro sin etiqueta <param> correspondiente.
+           CS1591: Missing XML comment for publicly visible type/member. -->
+    <NoWarn>$(NoWarn);1570;1573;1591</NoWarn>
+
+    <!-- Metadatos de Vorluno -->
+    <Company>Vorluno</Company>
+    <Product>Vorluno Planilla - VOR-PLAN</Product>
+    <Description>Vorluno Planilla - Enterprise payroll management system - Web API</Description>
+    <Authors>Vorluno</Authors>
+    <Copyright>Copyright © Vorluno 2025</Copyright>
+    <RepositoryUrl>https://github.com/vorluno/planilla</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="AutoMapper.Extensions.Microsoft.DependencyInjection" Version="12.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.6" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.6" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.6" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.2" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.1" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.15.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Core\Planilla.Application\Vorluno.Planilla.Application.csproj" />
+    <ProjectReference Include="..\..\Core\Planilla.Domain\Vorluno.Planilla.Domain.csproj" />
+    <ProjectReference Include="..\..\Infrastructure\Planilla.Infrastructure\Vorluno.Planilla.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

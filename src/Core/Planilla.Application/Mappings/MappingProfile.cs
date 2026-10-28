@@ -1,9 +1,8 @@
-﻿using AutoMapper;
-using Planilla.Application.DTOs;
-using Planilla.Domain.Entities;
-using static System.Runtime.InteropServices.JavaScript.JSType;
+using AutoMapper;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Domain.Entities;
 
-namespace Planilla.Application.Mappings
+namespace Vorluno.Planilla.Application.Mappings
 {
     /// <summary>
     /// Define las reglas de mapeo entre las entidades del dominio y los DTOs.
@@ -16,11 +15,56 @@ namespace Planilla.Application.Mappings
             // Mapeo de Entidad a DTO (para operaciones de lectura)
             CreateMap<Empleado, EmpleadoVerDto>()
                 .ForMember(dest => dest.DepartamentoNombre, opt => opt.MapFrom(src => src.Departamento != null ? src.Departamento.Nombre : null))
-                .ForMember(dest => dest.PosicionNombre, opt => opt.MapFrom(src => src.Posicion != null ? src.Posicion.Nombre : null));
+                .ForMember(dest => dest.PosicionNombre, opt => opt.MapFrom(src => src.Posicion != null ? src.Posicion.Nombre : null))
+                .ForMember(dest => dest.TieneAccesoSistema, opt => opt.MapFrom(src => !string.IsNullOrEmpty(src.UserId)))
+                .ForMember(dest => dest.RolSistema, opt => opt.Ignore())
+                .ForMember(dest => dest.PayPeriodTypeName, opt => opt.MapFrom(src => src.PayPeriodType.ToString()))
+                .ForMember(dest => dest.PayPeriodTypeValue, opt => opt.MapFrom(src => (int)src.PayPeriodType))
+                .ForMember(dest => dest.HoursPerWeek, opt => opt.MapFrom(src => src.HoursPerWeek))
+                .ForMember(dest => dest.HoursPerPeriod, opt => opt.MapFrom(src => src.HoursPerPeriod))
+                .ForMember(dest => dest.HourlyRate, opt => opt.MapFrom(src => src.HourlyRate))
+                .ForMember(dest => dest.YearsCotized, opt => opt.MapFrom(src => src.YearsCotized))
+                .ForMember(dest => dest.AverageSalaryLast10Years, opt => opt.MapFrom(src => src.AverageSalaryLast10Years))
+                .ForMember(dest => dest.Dependents, opt => opt.MapFrom(src => src.Dependents))
+                .ForMember(dest => dest.CssRiskPercentage, opt => opt.MapFrom(src => src.CssRiskPercentage));
 
             // Mapeo de DTO a Entidad (para operaciones de escritura/actualización)
-            CreateMap<EmpleadoCrearDto, Empleado>();
-            CreateMap<EmpleadoActualizarDto, Empleado>();
+            CreateMap<EmpleadoCrearDto, Empleado>()
+                .ForMember(dest => dest.HoursPerPeriod, opt => opt.Ignore())
+                .AfterMap((src, dest) =>
+                {
+                    if (src.HoursPerPeriod == null || src.HoursPerPeriod == 0)
+                    {
+                        dest.HoursPerPeriod = Empleado.CalculateSuggestedHoursPerPeriod(
+                            dest.HoursPerWeek, dest.PayPeriodType);
+                    }
+                    else
+                    {
+                        dest.HoursPerPeriod = src.HoursPerPeriod.Value;
+                    }
+                    dest.RecalculateHourlyRate();
+                    dest.SyncPayFrequencyFromType();
+                });
+
+            CreateMap<EmpleadoActualizarDto, Empleado>()
+                .ForMember(dest => dest.HoursPerPeriod, opt => opt.Ignore())
+                // FechaContratacion: solo se actualiza si viene un valor en el DTO
+                .ForMember(dest => dest.FechaContratacion, opt => opt.Condition((src, dest, srcMember) => src.FechaContratacion.HasValue))
+                .ForMember(dest => dest.FechaContratacion, opt => opt.MapFrom(src => src.FechaContratacion!.Value))
+                .AfterMap((src, dest) =>
+                {
+                    if (src.HoursPerPeriod == null || src.HoursPerPeriod == 0)
+                    {
+                        dest.HoursPerPeriod = Empleado.CalculateSuggestedHoursPerPeriod(
+                            dest.HoursPerWeek, dest.PayPeriodType);
+                    }
+                    else
+                    {
+                        dest.HoursPerPeriod = src.HoursPerPeriod.Value;
+                    }
+                    dest.RecalculateHourlyRate();
+                    dest.SyncPayFrequencyFromType();
+                });
         }
     }
 }

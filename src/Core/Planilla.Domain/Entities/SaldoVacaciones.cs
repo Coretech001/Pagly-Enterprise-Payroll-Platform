@@ -1,9 +1,11 @@
-namespace Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Interfaces;
+
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa el saldo de días de vacaciones de un empleado
 /// </summary>
-public class SaldoVacaciones
+public class SaldoVacaciones : ITenantEntity
 {
     public int Id { get; set; }
 
@@ -12,7 +14,11 @@ public class SaldoVacaciones
     /// </summary>
     public int EmpleadoId { get; set; }
     public Empleado Empleado { get; set; } = null!;
-    public int CompanyId { get; set; }
+
+    /// <summary>
+    /// ID del tenant al que pertenece este saldo
+    /// </summary>
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Días de vacaciones acumulados
@@ -47,4 +53,7 @@ public class SaldoVacaciones
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

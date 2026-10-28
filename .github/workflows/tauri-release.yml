@@ -1,0 +1,158 @@
+name: Tauri Desktop Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            rust-targets: x86_64-pc-windows-msvc
+          - platform: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            rust-targets: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Dependencias Linux ──────────────────────────────────────────────────
+      - name: Instalar dependencias Linux (webkit2gtk, etc.)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # ── Node.js + frontend ──────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: src/UI/Planilla.Web/ClientApp/package-lock.json
+
+      - name: Instalar dependencias npm (ClientApp)
+        working-directory: src/UI/Planilla.Web/ClientApp
+        run: npm ci
+
+      - name: Instalar dependencias npm (Desktop — Tauri CLI)
+        working-directory: src/UI/Planilla.Desktop
+        run: npm ci
+
+      - name: Build frontend (modo desktop)
+        working-directory: src/UI/Planilla.Web/ClientApp
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL != '' && secrets.VITE_API_URL || 'https://app.pagly.clau.com.pa' }}
+          VITE_APP_ENV: production
+          VITE_ENABLE_STRIPE: 'true'
+          VITE_STRIPE_PUBLIC_KEY: ${{ secrets.VITE_STRIPE_PUBLIC_KEY }}
+        run: npm run build:desktop
+
+      # ── Rust ────────────────────────────────────────────────────────────────
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Cache Rust (Cargo)
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src/UI/Planilla.Desktop/src-tauri -> target
+
+      # ── Tauri build ─────────────────────────────────────────────────────────
+      - name: Build instalador Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: src/UI/Planilla.Desktop
+          tauriScript: npx tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Pagly Desktop ${{ github.ref_name }}'
+          releaseBody: |
+            ## Pagly Desktop ${{ github.ref_name }}
+
+            ### Instalación
+            - **Windows**: Descargar `.msi` o `.exe` y ejecutar
+            - **macOS**: Descargar `.dmg`, arrastrar a Aplicaciones
+            - **Linux**: Descargar `.AppImage` (portable) o `.deb`
+
+            ### Nota (Windows)
+            Si Windows SmartScreen muestra advertencia: "Más información" → "Ejecutar de todas formas".
+            Próximamente con firma de código para eliminar esta advertencia.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.platform == 'macos-latest' && '--target universal-apple-darwin' || '' }}
+
+      # ── Alias estáticos en repo PÚBLICO vorluno/pagly-releases ────────────────
+      - name: Preparar alias Windows
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          exe=$(find src/UI/Planilla.Desktop/src-tauri/target -name "*_x64-setup.exe" | head -1)
+          [ -z "$exe" ] && echo "ERROR: installer not found" && exit 1
+          cp "$exe" Pagly-Windows-Setup.exe
+
+      - name: Publicar alias Windows en repo público
+        if: matrix.platform == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: vorluno/pagly-releases
+          tag_name: ${{ github.ref_name }}
+          name: "Pagly Desktop ${{ github.ref_name }}"
+          body: "Descarga desde [vorluno.dev/productos/pagly](https://vorluno.dev/productos/pagly)"
+          files: Pagly-Windows-Setup.exe
+          token: ${{ secrets.RELEASES_PAT }}
+
+      - name: Preparar alias macOS
+        if: matrix.platform == 'macos-latest'
+        run: |
+          dmg=$(find src/UI/Planilla.Desktop/src-tauri/target -name "*.dmg" | head -1)
+          [ -z "$dmg" ] && echo "ERROR: dmg not found" && exit 1
+          cp "$dmg" Pagly-macOS.dmg
+
+      - name: Publicar alias macOS en repo público
+        if: matrix.platform == 'macos-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: vorluno/pagly-releases
+          tag_name: ${{ github.ref_name }}
+          name: "Pagly Desktop ${{ github.ref_name }}"
+          body: "Descarga desde [vorluno.dev/productos/pagly](https://vorluno.dev/productos/pagly)"
+          files: Pagly-macOS.dmg
+          token: ${{ secrets.RELEASES_PAT }}
+
+      - name: Preparar alias Linux
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          appimage=$(find src/UI/Planilla.Desktop/src-tauri/target -name "*.AppImage" | head -1)
+          [ -z "$appimage" ] && echo "ERROR: AppImage not found" && exit 1
+          cp "$appimage" Pagly-Linux.AppImage
+
+      - name: Publicar alias Linux en repo público
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: vorluno/pagly-releases
+          tag_name: ${{ github.ref_name }}
+          name: "Pagly Desktop ${{ github.ref_name }}"
+          body: "Descarga desde [vorluno.dev/productos/pagly](https://vorluno.dev/productos/pagly)"
+          files: Pagly-Linux.AppImage
+          token: ${{ secrets.RELEASES_PAT }}

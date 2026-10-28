@@ -1,8 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { useToast } from '../components/ToastContext';
+import { createPortal } from 'react-dom';
+import toast from 'react-hot-toast';
+import { api } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
+import { formatDate, formatDateShort, formatDayMonth, todayInputValue } from '../utils/date';
 
 const VacacionesPage = () => {
-    const { showToast } = useToast();
+    // Auth context for permissions
+    const { canWrite, canDelete, isReadOnly } = useAuth();
 
     // State management
     const [vacaciones, setVacaciones] = useState([]);
@@ -18,10 +23,15 @@ const VacacionesPage = () => {
     // Form data
     const [formData, setFormData] = useState({
         empleadoId: '',
-        fechaInicio: new Date().toISOString().split('T')[0],
-        fechaFin: new Date().toISOString().split('T')[0],
+        fechaInicio: todayInputValue(),
+        fechaFin: todayInputValue(),
         observaciones: ''
     });
+
+    // Cálculo vacacional automático
+    const [calculoVacacional, setCalculoVacacional] = useState(null);
+    const [calculandoSalario, setCalculandoSalario] = useState(false);
+    const [numPeriodosCalculo, setNumPeriodosCalculo] = useState('');
 
     useEffect(() => {
         fetchVacaciones();
@@ -37,12 +47,10 @@ const VacacionesPage = () => {
     const fetchVacaciones = async () => {
         try {
             setLoading(true);
-            const response = await fetch('/api/vacaciones');
-            if (!response.ok) throw new Error(`Error ${response.status}`);
-            const data = await response.json();
+            const data = await api.get('/api/vacaciones');
             setVacaciones(data);
         } catch (err) {
-            showToast({ type: 'error', message: `Error al cargar vacaciones: ${err.message}` });
+            toast.error(`Error al cargar vacaciones: ${err.message}`);
         } finally {
             setLoading(false);
         }
@@ -51,23 +59,21 @@ const VacacionesPage = () => {
     const fetchSaldos = async () => {
         try {
             const saldosPromises = empleados.map(emp =>
-                fetch(`/api/vacaciones/saldo/${emp.id}`).then(r => r.ok ? r.json() : null)
+                api.get(`/api/vacaciones/saldo/${emp.id}`).catch(() => null)
             );
             const saldosData = await Promise.all(saldosPromises);
             setSaldos(saldosData.filter(s => s !== null));
         } catch (err) {
-            showToast({ type: 'error', message: `Error al cargar saldos: ${err.message}` });
+            toast.error(`Error al cargar saldos: ${err.message}`);
         }
     };
 
     const fetchEmpleados = async () => {
         try {
-            const response = await fetch('/api/empleados');
-            if (!response.ok) throw new Error(`Error ${response.status}`);
-            const data = await response.json();
+            const data = await api.get('/api/empleados');
             setEmpleados(data.filter(e => e.estaActivo));
         } catch (err) {
-            showToast({ type: 'error', message: `Error al cargar empleados: ${err.message}` });
+            toast.error(`Error al cargar empleados: ${err.message}`);
         }
     };
 
@@ -100,14 +106,14 @@ const VacacionesPage = () => {
 
     const getEstadoColor = (estado) => {
         const colores = {
-            1: 'bg-yellow-100 text-yellow-800',
-            2: 'bg-green-100 text-green-800',
-            3: 'bg-blue-100 text-blue-800',
-            4: 'bg-gray-100 text-gray-800',
-            5: 'bg-gray-100 text-gray-600',
-            6: 'bg-red-100 text-red-800'
+            1: 'bg-amber-500/15 text-amber-400',
+            2: 'bg-green-500/15 text-green-400',
+            3: 'bg-blue-500/15 text-blue-400',
+            4: 'bg-navy-700 text-gray-300',
+            5: 'bg-navy-700 text-gray-400',
+            6: 'bg-red-500/15 text-red-400'
         };
-        return colores[estado] || 'bg-gray-100 text-gray-800';
+        return colores[estado] || 'bg-navy-700 text-gray-300';
     };
 
     const handleSubmit = async (e) => {
@@ -121,33 +127,23 @@ const VacacionesPage = () => {
                 observaciones: formData.observaciones || null
             };
 
-            const response = await fetch('/api/vacaciones', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.message || 'Error al crear solicitud');
-            }
+            await api.post('/api/vacaciones', payload);
 
             await fetchVacaciones();
-            showToast({ type: 'success', message: 'Solicitud de vacaciones creada' });
+            toast.success('Solicitud de vacaciones creada');
             resetForm();
         } catch (err) {
-            showToast({ type: 'error', message: `Error: ${err.message}` });
+            toast.error(`Error: ${err.message}`);
         }
     };
 
     const handleAprobar = async (id) => {
         try {
-            const response = await fetch(`/api/vacaciones/${id}/aprobar`, { method: 'POST' });
-            if (!response.ok) throw new Error('Error al aprobar');
+            await api.post(`/api/vacaciones/${id}/aprobar`, {});
             await fetchVacaciones();
-            showToast({ type: 'success', message: 'Solicitud aprobada' });
+            toast.success('Solicitud aprobada');
         } catch (err) {
-            showToast({ type: 'error', message: err.message });
+            toast.error(err.message);
         }
     };
 
@@ -159,25 +155,20 @@ const VacacionesPage = () => {
 
     const handleRechazar = async () => {
         if (!motivoRechazo.trim()) {
-            showToast({ type: 'error', message: 'Debe especificar el motivo del rechazo' });
+            toast.error('Debe especificar el motivo del rechazo');
             return;
         }
 
         try {
-            const response = await fetch(`/api/vacaciones/${solicitudToReject.id}/rechazar`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ motivo: motivoRechazo })
-            });
+            await api.post(`/api/vacaciones/${solicitudToReject.id}/rechazar`, { motivo: motivoRechazo });
 
-            if (!response.ok) throw new Error('Error al rechazar');
             await fetchVacaciones();
-            showToast({ type: 'success', message: 'Solicitud rechazada' });
+            toast.success('Solicitud rechazada');
             setShowRejectModal(false);
             setSolicitudToReject(null);
             setMotivoRechazo('');
         } catch (err) {
-            showToast({ type: 'error', message: err.message });
+            toast.error(err.message);
         }
     };
 
@@ -185,12 +176,11 @@ const VacacionesPage = () => {
         if (!window.confirm('¿Está seguro de cancelar esta solicitud?')) return;
 
         try {
-            const response = await fetch(`/api/vacaciones/${id}/cancelar`, { method: 'DELETE' });
-            if (!response.ok) throw new Error('Error al cancelar');
+            await api.delete(`/api/vacaciones/${id}/cancelar`);
             await fetchVacaciones();
-            showToast({ type: 'success', message: 'Solicitud cancelada' });
+            toast.success('Solicitud cancelada');
         } catch (err) {
-            showToast({ type: 'error', message: err.message });
+            toast.error(err.message);
         }
     };
 
@@ -198,18 +188,42 @@ const VacacionesPage = () => {
         setShowModal(false);
         setFormData({
             empleadoId: '',
-            fechaInicio: new Date().toISOString().split('T')[0],
-            fechaFin: new Date().toISOString().split('T')[0],
+            fechaInicio: todayInputValue(),
+            fechaFin: todayInputValue(),
             observaciones: ''
         });
+        setCalculoVacacional(null);
+        setNumPeriodosCalculo('');
+    };
+
+    const calcularSalarioVacacional = async (empleadoId, fechaInicio, fechaFin, periodos) => {
+        if (!empleadoId || !fechaInicio || !fechaFin) return;
+        const dias = Math.ceil((new Date(fechaFin) - new Date(fechaInicio)) / (1000 * 60 * 60 * 24)) + 1;
+        if (dias <= 0) return;
+
+        setCalculandoSalario(true);
+        try {
+            const params = new URLSearchParams({
+                empleadoId,
+                fechaInicio,
+                diasVacaciones: dias,
+                ...(periodos ? { numPeriodos: periodos } : {})
+            });
+            const data = await api.get(`/api/vacaciones/calcular-salario?${params}`);
+            setCalculoVacacional(data);
+        } catch {
+            setCalculoVacacional(null);
+        } finally {
+            setCalculandoSalario(false);
+        }
     };
 
     if (loading) {
         return (
             <div className="flex items-center justify-center min-h-96">
                 <div className="text-center">
-                    <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-                    <p className="text-gray-600">Cargando vacaciones...</p>
+                    <div className="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                    <p className="text-gray-400">Cargando vacaciones...</p>
                 </div>
             </div>
         );
@@ -219,56 +233,56 @@ const VacacionesPage = () => {
         <div className="space-y-6">
             {/* Stats Cards */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <div className="bg-navy-900 rounded-xl shadow-lg shadow-black/20 border border-navy-700 p-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm font-medium text-gray-600">Pendientes</p>
-                            <p className="text-3xl font-bold text-gray-900 mt-2">{pendientes}</p>
+                            <p className="text-sm font-medium text-gray-400">Pendientes</p>
+                            <p className="text-3xl font-bold text-gray-100 mt-2">{pendientes}</p>
                         </div>
-                        <div className="w-12 h-12 bg-yellow-100 rounded-lg flex items-center justify-center">
-                            <svg className="w-6 h-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="w-12 h-12 bg-amber-500/15 rounded-lg flex items-center justify-center">
+                            <svg className="w-6 h-6 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <div className="bg-navy-900 rounded-xl shadow-lg shadow-black/20 border border-navy-700 p-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm font-medium text-gray-600">En Curso</p>
-                            <p className="text-3xl font-bold text-gray-900 mt-2">{enCurso}</p>
+                            <p className="text-sm font-medium text-gray-400">En Curso</p>
+                            <p className="text-3xl font-bold text-gray-100 mt-2">{enCurso}</p>
                         </div>
-                        <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
-                            <svg className="w-6 h-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="w-12 h-12 bg-primary-500/10 rounded-lg flex items-center justify-center">
+                            <svg className="w-6 h-6 text-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <div className="bg-navy-900 rounded-xl shadow-lg shadow-black/20 border border-navy-700 p-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm font-medium text-gray-600">Días Otorgados</p>
-                            <p className="text-3xl font-bold text-gray-900 mt-2">{diasOtorgados}</p>
+                            <p className="text-sm font-medium text-gray-400">Días Otorgados</p>
+                            <p className="text-3xl font-bold text-gray-100 mt-2">{diasOtorgados}</p>
                         </div>
-                        <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
-                            <svg className="w-6 h-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="w-12 h-12 bg-green-500/15 rounded-lg flex items-center justify-center">
+                            <svg className="w-6 h-6 text-green-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                <div className="bg-navy-900 rounded-xl shadow-lg shadow-black/20 border border-navy-700 p-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm font-medium text-gray-600">Próximas (30 días)</p>
-                            <p className="text-3xl font-bold text-gray-900 mt-2">{proximas}</p>
+                            <p className="text-sm font-medium text-gray-400">Próximas (30 días)</p>
+                            <p className="text-3xl font-bold text-gray-100 mt-2">{proximas}</p>
                         </div>
-                        <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
-                            <svg className="w-6 h-6 text-purple-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <div className="w-12 h-12 bg-purple-500/15 rounded-lg flex items-center justify-center">
+                            <svg className="w-6 h-6 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                             </svg>
                         </div>
@@ -277,15 +291,15 @@ const VacacionesPage = () => {
             </div>
 
             {/* Tabs */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                <div className="border-b border-gray-200">
+            <div className="bg-navy-900 rounded-xl shadow-lg shadow-black/20 border border-navy-700 overflow-hidden">
+                <div className="border-b border-navy-700">
                     <div className="flex gap-4 px-6">
                         <button
                             onClick={() => setActiveTab('solicitudes')}
                             className={`py-4 px-2 border-b-2 font-medium text-sm transition-colors ${
                                 activeTab === 'solicitudes'
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                                    ? 'border-primary-500 text-primary-400'
+                                    : 'border-transparent text-gray-500 hover:text-gray-200'
                             }`}
                         >
                             Solicitudes
@@ -294,8 +308,8 @@ const VacacionesPage = () => {
                             onClick={() => setActiveTab('calendario')}
                             className={`py-4 px-2 border-b-2 font-medium text-sm transition-colors ${
                                 activeTab === 'calendario'
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                                    ? 'border-primary-500 text-primary-400'
+                                    : 'border-transparent text-gray-500 hover:text-gray-200'
                             }`}
                         >
                             Calendario
@@ -304,8 +318,8 @@ const VacacionesPage = () => {
                             onClick={() => setActiveTab('saldos')}
                             className={`py-4 px-2 border-b-2 font-medium text-sm transition-colors ${
                                 activeTab === 'saldos'
-                                    ? 'border-blue-600 text-blue-600'
-                                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                                    ? 'border-primary-500 text-primary-400'
+                                    : 'border-transparent text-gray-500 hover:text-gray-200'
                             }`}
                         >
                             Saldos
@@ -314,7 +328,7 @@ const VacacionesPage = () => {
                         <div className="flex items-center">
                             <button
                                 onClick={() => setShowModal(true)}
-                                className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-sm my-2"
+                                className="inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-lg shadow-black/20 my-2"
                             >
                                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -330,7 +344,7 @@ const VacacionesPage = () => {
                     <div className="p-6">
                         <div className="overflow-x-auto">
                             <table className="w-full">
-                                <thead className="bg-gray-50 border-b border-gray-200">
+                                <thead className="bg-navy-950 border-b border-navy-700">
                                     <tr>
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Empleado</th>
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Período</th>
@@ -340,16 +354,16 @@ const VacacionesPage = () => {
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Acciones</th>
                                     </tr>
                                 </thead>
-                                <tbody className="bg-white divide-y divide-gray-200">
+                                <tbody className="bg-navy-900 divide-y divide-navy-700">
                                     {vacaciones.map((vac) => (
-                                        <tr key={vac.id} className="hover:bg-gray-50 transition-colors">
-                                            <td className="py-4 px-4 text-sm text-gray-900">{vac.empleadoNombre}</td>
+                                        <tr key={vac.id} className="hover:bg-navy-800 transition-colors">
+                                            <td className="py-4 px-4 text-sm text-gray-100">{vac.empleadoNombre}</td>
                                             <td className="py-4 px-4 text-sm text-gray-500">
-                                                {new Date(vac.fechaInicio).toLocaleDateString('es-PA', { day: '2-digit', month: 'short' })} - {new Date(vac.fechaFin).toLocaleDateString('es-PA', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                                {formatDayMonth(vac.fechaInicio)} - {formatDate(vac.fechaFin)}
                                             </td>
-                                            <td className="py-4 px-4 text-sm font-medium text-gray-900">{vac.diasVacaciones}</td>
+                                            <td className="py-4 px-4 text-sm font-medium text-gray-100">{vac.diasVacaciones}</td>
                                             <td className="py-4 px-4 text-sm text-gray-500">
-                                                {new Date(vac.fechaSolicitud).toLocaleDateString('es-PA', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                                {formatDate(vac.fechaSolicitud)}
                                             </td>
                                             <td className="py-4 px-4">
                                                 <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getEstadoColor(vac.estado)}`}>
@@ -362,7 +376,7 @@ const VacacionesPage = () => {
                                                         <>
                                                             <button
                                                                 onClick={() => handleAprobar(vac.id)}
-                                                                className="inline-flex items-center gap-1 text-green-600 hover:text-green-800 font-medium text-sm"
+                                                                className="inline-flex items-center gap-1 text-green-400 hover:text-green-300 font-medium text-sm"
                                                             >
                                                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -371,7 +385,7 @@ const VacacionesPage = () => {
                                                             </button>
                                                             <button
                                                                 onClick={() => openRejectModal(vac)}
-                                                                className="inline-flex items-center gap-1 text-red-600 hover:text-red-800 font-medium text-sm"
+                                                                className="inline-flex items-center gap-1 text-red-400 hover:text-red-300 font-medium text-sm"
                                                             >
                                                                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -383,7 +397,7 @@ const VacacionesPage = () => {
                                                     {(vac.estado === 1 || vac.estado === 2) && (
                                                         <button
                                                             onClick={() => handleCancelar(vac.id)}
-                                                            className="inline-flex items-center gap-1 text-gray-600 hover:text-gray-800 font-medium text-sm"
+                                                            className="inline-flex items-center gap-1 text-gray-400 hover:text-gray-200 font-medium text-sm"
                                                         >
                                                             Cancelar
                                                         </button>
@@ -402,7 +416,7 @@ const VacacionesPage = () => {
 
                             {vacaciones.length === 0 && (
                                 <div className="text-center py-12">
-                                    <h3 className="text-lg font-medium text-gray-900 mb-1">
+                                    <h3 className="text-lg font-medium text-gray-100 mb-1">
                                         No hay solicitudes de vacaciones
                                     </h3>
                                     <p className="text-gray-500">Comienza creando una nueva solicitud</p>
@@ -419,22 +433,22 @@ const VacacionesPage = () => {
                             {vacaciones
                                 .filter(v => v.estado === 2 || v.estado === 3)
                                 .map((vac) => (
-                                    <div key={vac.id} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors">
+                                    <div key={vac.id} className="border border-navy-700 rounded-lg p-4 hover:bg-navy-800 transition-colors">
                                         <div className="flex items-start justify-between">
                                             <div className="flex-1">
                                                 <div className="flex items-center gap-2 mb-2">
-                                                    <div className="w-3 h-3 rounded-full bg-blue-600"></div>
-                                                    <h4 className="font-medium text-gray-900">{vac.empleadoNombre}</h4>
+                                                    <div className="w-3 h-3 rounded-full bg-primary-600"></div>
+                                                    <h4 className="font-medium text-gray-100">{vac.empleadoNombre}</h4>
                                                     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getEstadoColor(vac.estado)}`}>
                                                         {vac.estadoNombre}
                                                     </span>
                                                 </div>
-                                                <div className="flex items-center gap-4 text-sm text-gray-600">
+                                                <div className="flex items-center gap-4 text-sm text-gray-400">
                                                     <div className="flex items-center gap-1">
                                                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                                                         </svg>
-                                                        {new Date(vac.fechaInicio).toLocaleDateString('es-PA')} - {new Date(vac.fechaFin).toLocaleDateString('es-PA')}
+                                                        {formatDateShort(vac.fechaInicio)} - {formatDateShort(vac.fechaFin)}
                                                     </div>
                                                     <div className="flex items-center gap-1">
                                                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -450,7 +464,7 @@ const VacacionesPage = () => {
 
                             {vacaciones.filter(v => v.estado === 2 || v.estado === 3).length === 0 && (
                                 <div className="text-center py-12">
-                                    <h3 className="text-lg font-medium text-gray-900 mb-1">
+                                    <h3 className="text-lg font-medium text-gray-100 mb-1">
                                         No hay vacaciones activas
                                     </h3>
                                     <p className="text-gray-500">Las vacaciones aprobadas y en curso aparecerán aquí</p>
@@ -465,7 +479,7 @@ const VacacionesPage = () => {
                     <div className="p-6">
                         <div className="overflow-x-auto">
                             <table className="w-full">
-                                <thead className="bg-gray-50 border-b border-gray-200">
+                                <thead className="bg-navy-950 border-b border-navy-700">
                                     <tr>
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Empleado</th>
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Acumulados</th>
@@ -475,21 +489,21 @@ const VacacionesPage = () => {
                                         <th className="text-left py-3 px-4 text-xs font-medium text-gray-500 uppercase">Período</th>
                                     </tr>
                                 </thead>
-                                <tbody className="bg-white divide-y divide-gray-200">
+                                <tbody className="bg-navy-900 divide-y divide-navy-700">
                                     {saldos.map((saldo) => {
                                         const porcentajeUsado = saldo.diasAcumulados > 0
                                             ? (saldo.diasTomados / saldo.diasAcumulados) * 100
                                             : 0;
 
                                         return (
-                                            <tr key={saldo.empleadoId} className="hover:bg-gray-50 transition-colors">
-                                                <td className="py-4 px-4 text-sm text-gray-900">{saldo.empleadoNombre}</td>
-                                                <td className="py-4 px-4 text-sm font-medium text-gray-900">{saldo.diasAcumulados.toFixed(1)}</td>
-                                                <td className="py-4 px-4 text-sm text-gray-600">{saldo.diasTomados.toFixed(1)}</td>
-                                                <td className="py-4 px-4 text-sm font-bold text-green-600">{saldo.diasDisponibles.toFixed(1)}</td>
+                                            <tr key={saldo.empleadoId} className="hover:bg-navy-800 transition-colors">
+                                                <td className="py-4 px-4 text-sm text-gray-100">{saldo.empleadoNombre}</td>
+                                                <td className="py-4 px-4 text-sm font-medium text-gray-100">{saldo.diasAcumulados.toFixed(1)}</td>
+                                                <td className="py-4 px-4 text-sm text-gray-400">{saldo.diasTomados.toFixed(1)}</td>
+                                                <td className="py-4 px-4 text-sm font-bold text-green-400">{saldo.diasDisponibles.toFixed(1)}</td>
                                                 <td className="py-4 px-4">
                                                     <div className="flex items-center gap-2">
-                                                        <div className="flex-1 bg-gray-200 rounded-full h-2 w-24">
+                                                        <div className="flex-1 bg-navy-700 rounded-full h-2 w-24">
                                                             <div
                                                                 className={`h-2 rounded-full ${
                                                                     porcentajeUsado >= 80 ? 'bg-red-600' :
@@ -499,7 +513,7 @@ const VacacionesPage = () => {
                                                                 style={{ width: `${Math.min(porcentajeUsado, 100)}%` }}
                                                             ></div>
                                                         </div>
-                                                        <span className="text-xs text-gray-600">{porcentajeUsado.toFixed(0)}%</span>
+                                                        <span className="text-xs text-gray-400">{porcentajeUsado.toFixed(0)}%</span>
                                                     </div>
                                                 </td>
                                                 <td className="py-4 px-4 text-sm text-gray-500">
@@ -513,7 +527,7 @@ const VacacionesPage = () => {
 
                             {saldos.length === 0 && (
                                 <div className="text-center py-12">
-                                    <h3 className="text-lg font-medium text-gray-900 mb-1">
+                                    <h3 className="text-lg font-medium text-gray-100 mb-1">
                                         No hay saldos disponibles
                                     </h3>
                                     <p className="text-gray-500">Los saldos se crean al registrar la primera solicitud</p>
@@ -525,14 +539,14 @@ const VacacionesPage = () => {
             </div>
 
             {/* Modal Nueva Solicitud */}
-            {showModal && (
+            {showModal && createPortal(
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-                        <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white">
-                            <h3 className="text-xl font-semibold text-gray-900">Nueva Solicitud de Vacaciones</h3>
+                    <div className="bg-navy-900 rounded-xl shadow-2xl shadow-black/30 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                        <div className="px-6 py-4 border-b border-navy-700 flex items-center justify-between sticky top-0 bg-navy-900">
+                            <h3 className="text-xl font-semibold text-gray-100">Nueva Solicitud de Vacaciones</h3>
                             <button
                                 onClick={resetForm}
-                                className="text-gray-400 hover:text-gray-600 transition-colors"
+                                className="text-gray-400 hover:text-gray-400 transition-colors"
                             >
                                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -543,14 +557,17 @@ const VacacionesPage = () => {
                         <form onSubmit={handleSubmit} className="p-6">
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                                 <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
                                         Empleado <span className="text-red-500">*</span>
                                     </label>
                                     <select
                                         required
                                         value={formData.empleadoId}
-                                        onChange={(e) => setFormData({ ...formData, empleadoId: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        onChange={(e) => {
+                                            setFormData({ ...formData, empleadoId: e.target.value });
+                                            setCalculoVacacional(null);
+                                        }}
+                                        className="w-full px-3 py-2 border border-navy-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 bg-navy-800 text-gray-100"
                                     >
                                         <option value="">Seleccionar empleado...</option>
                                         {empleados.map(emp => (
@@ -562,79 +579,146 @@ const VacacionesPage = () => {
                                 </div>
 
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
                                         Fecha Inicio <span className="text-red-500">*</span>
                                     </label>
                                     <input
                                         type="date"
                                         required
                                         value={formData.fechaInicio}
-                                        onChange={(e) => setFormData({ ...formData, fechaInicio: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        onChange={(e) => {
+                                            setFormData({ ...formData, fechaInicio: e.target.value });
+                                            setCalculoVacacional(null);
+                                        }}
+                                        className="w-full px-3 py-2 border border-navy-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 bg-navy-800 text-gray-100"
                                     />
                                 </div>
 
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
                                         Fecha Fin <span className="text-red-500">*</span>
                                     </label>
                                     <input
                                         type="date"
                                         required
                                         value={formData.fechaFin}
-                                        onChange={(e) => setFormData({ ...formData, fechaFin: e.target.value })}
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        onChange={(e) => {
+                                            setFormData({ ...formData, fechaFin: e.target.value });
+                                            setCalculoVacacional(null);
+                                        }}
+                                        className="w-full px-3 py-2 border border-navy-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 bg-navy-800 text-gray-100"
                                     />
                                 </div>
 
+                                {/* Panel de cálculo vacacional automático */}
                                 <div className="md:col-span-2">
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    <div className="bg-navy-800/60 border border-navy-600/50 rounded-xl p-4">
+                                        <div className="flex items-center justify-between mb-3">
+                                            <p className="text-sm font-semibold text-emerald-400">Salario Vacacional</p>
+                                            <div className="flex items-center gap-2">
+                                                <label className="text-xs text-gray-400">Períodos:</label>
+                                                <input
+                                                    type="number"
+                                                    min="1"
+                                                    max="100"
+                                                    value={numPeriodosCalculo}
+                                                    onChange={e => setNumPeriodosCalculo(e.target.value)}
+                                                    placeholder="Auto"
+                                                    className="w-16 px-2 py-1 bg-navy-700 border border-navy-600 rounded text-gray-100 text-xs text-center focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => calcularSalarioVacacional(formData.empleadoId, formData.fechaInicio, formData.fechaFin, numPeriodosCalculo || undefined)}
+                                                    disabled={!formData.empleadoId || !formData.fechaInicio || !formData.fechaFin || calculandoSalario}
+                                                    className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-medium transition-colors disabled:opacity-40"
+                                                >
+                                                    {calculandoSalario ? 'Calculando...' : 'Calcular'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                        {calculoVacacional ? (
+                                            <div className="space-y-2">
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                                    <div className="bg-navy-700/50 rounded-lg p-2.5">
+                                                        <p className="text-gray-400 mb-0.5">Períodos usados</p>
+                                                        <p className="text-gray-100 font-semibold">{calculoVacacional.numPeriodosUsados}</p>
+                                                    </div>
+                                                    <div className="bg-navy-700/50 rounded-lg p-2.5">
+                                                        <p className="text-gray-400 mb-0.5">Total devengado</p>
+                                                        <p className="text-gray-100 font-semibold font-mono">B/. {calculoVacacional.totalDevengado?.toFixed(2)}</p>
+                                                    </div>
+                                                    <div className="bg-navy-700/50 rounded-lg p-2.5">
+                                                        <p className="text-gray-400 mb-0.5">Salario diario</p>
+                                                        <p className="text-emerald-400 font-semibold font-mono">B/. {calculoVacacional.salarioDiario?.toFixed(2)}</p>
+                                                    </div>
+                                                    <div className="bg-emerald-600/20 border border-emerald-500/30 rounded-lg p-2.5">
+                                                        <p className="text-emerald-400 mb-0.5">Monto vacaciones</p>
+                                                        <p className="text-emerald-300 font-bold font-mono text-sm">B/. {calculoVacacional.montoVacaciones?.toFixed(2)}</p>
+                                                    </div>
+                                                </div>
+                                                <p className="text-xs text-gray-500">
+                                                    Período ref: {calculoVacacional.periodoDesde ? formatDateShort(calculoVacacional.periodoDesde) : '—'} — {calculoVacacional.periodoHasta ? formatDateShort(calculoVacacional.periodoHasta) : '—'} ({calculoVacacional.diasCalendarioCubiertos} días calendario)
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <p className="text-xs text-gray-500">
+                                                {!formData.empleadoId ? 'Selecciona un empleado para calcular el salario vacacional' :
+                                                 !formData.fechaFin ? 'Completa las fechas para calcular' :
+                                                 'Haz clic en "Calcular" para ver el salario vacacional estimado'}
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div className="md:col-span-2">
+                                    <label className="block text-sm font-medium text-gray-300 mb-2">
                                         Observaciones
                                     </label>
                                     <textarea
                                         value={formData.observaciones}
                                         onChange={(e) => setFormData({ ...formData, observaciones: e.target.value })}
                                         rows="3"
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        className="w-full px-3 py-2 border border-navy-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 bg-navy-800 text-gray-100"
                                         placeholder="Observaciones adicionales..."
                                     />
                                 </div>
                             </div>
 
-                            <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+                            <div className="flex justify-end gap-3 pt-4 border-t border-navy-700">
                                 <button
                                     type="button"
                                     onClick={resetForm}
-                                    className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium transition-colors"
+                                    className="px-4 py-2 border border-navy-600 rounded-lg text-gray-300 hover:bg-navy-800 font-medium transition-colors"
                                 >
                                     Cancelar
                                 </button>
                                 <button
                                     type="submit"
-                                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors shadow-sm"
+                                    className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg font-medium transition-colors shadow-lg shadow-black/20"
                                 >
                                     Crear Solicitud
                                 </button>
                             </div>
                         </form>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
 
             {/* Modal Rechazar */}
-            {showRejectModal && solicitudToReject && (
+            {showRejectModal && solicitudToReject && createPortal(
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-                    <div className="bg-white rounded-xl shadow-2xl max-w-md w-full">
-                        <div className="px-6 py-4 border-b border-gray-200">
-                            <h3 className="text-xl font-semibold text-gray-900">Rechazar Solicitud</h3>
+                    <div className="bg-navy-900 rounded-xl shadow-2xl shadow-black/30 max-w-md w-full">
+                        <div className="px-6 py-4 border-b border-navy-700">
+                            <h3 className="text-xl font-semibold text-gray-100">Rechazar Solicitud</h3>
                         </div>
 
                         <div className="p-6">
-                            <p className="text-gray-600 mb-4">
+                            <p className="text-gray-400 mb-4">
                                 ¿Está seguro de rechazar la solicitud de <strong>{solicitudToReject.empleadoNombre}</strong>?
                             </p>
 
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                            <label className="block text-sm font-medium text-gray-300 mb-2">
                                 Motivo del Rechazo <span className="text-red-500">*</span>
                             </label>
                             <textarea
@@ -642,19 +726,19 @@ const VacacionesPage = () => {
                                 value={motivoRechazo}
                                 onChange={(e) => setMotivoRechazo(e.target.value)}
                                 rows="3"
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                className="w-full px-3 py-2 border border-navy-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 bg-navy-800 text-gray-100"
                                 placeholder="Especifique el motivo del rechazo..."
                             />
                         </div>
 
-                        <div className="px-6 py-4 border-t border-gray-200 flex justify-end gap-3">
+                        <div className="px-6 py-4 border-t border-navy-700 flex justify-end gap-3">
                             <button
                                 onClick={() => {
                                     setShowRejectModal(false);
                                     setSolicitudToReject(null);
                                     setMotivoRechazo('');
                                 }}
-                                className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 font-medium transition-colors"
+                                className="px-4 py-2 border border-navy-600 rounded-lg text-gray-300 hover:bg-navy-800 font-medium transition-colors"
                             >
                                 Cancelar
                             </button>
@@ -666,7 +750,8 @@ const VacacionesPage = () => {
                             </button>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </div>
     );

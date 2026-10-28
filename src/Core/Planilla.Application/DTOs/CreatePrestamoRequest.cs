@@ -1,4 +1,6 @@
-namespace Planilla.Application.DTOs;
+using Vorluno.Planilla.Domain.Enums;
+
+namespace Vorluno.Planilla.Application.DTOs;
 
 /// <summary>
 /// DTO para creación de nuevos préstamos.
@@ -12,5 +14,6 @@ public record CreatePrestamoRequest(
     DateTime FechaInicio,
     int NumeroCuotas,
     string? Referencia,
-    string? Observaciones
+    string? Observaciones,
+    PayPeriodType FrecuenciaCuota = PayPeriodType.Mensual
 );

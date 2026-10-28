@@ -5,7 +5,9 @@
 // Descripción: Constantes de planilla (frecuencias de pago, etc.)
 // ====================================================================
 
-namespace Planilla.Application.Helpers;
+using Vorluno.Planilla.Domain.Enums;
+
+namespace Vorluno.Planilla.Application.Helpers;
 
 /// <summary>
 /// Constantes utilizadas en cálculos de planilla.
@@ -24,8 +26,52 @@ public static class PayrollConstants
     {
         { "Quincenal", 24 },  // 2 pagos por mes × 12 meses
         { "Mensual", 12 },    // 1 pago por mes × 12 meses
-        { "Semanal", 52 }     // ~4.33 semanas/mes × 12 meses (aproximadamente)
+        { "Semanal", 52 },    // ~4.33 semanas/mes × 12 meses (aproximadamente)
+        { "Bisemanal", 26 }   // 2 pagos por mes (cada 2 semanas exactas)
     };
+
+    /// <summary>
+    /// Meses incluyendo décimo tercer mes para proyección anual de ISR.
+    /// La DGI permite distribuir el ISR del décimo uniformemente en todos los períodos.
+    /// </summary>
+    public const int MonthsIncludingDecimo = 13;
+
+    // ====================================================================
+    // Tasas CSS / Seguro Educativo — Ley 462
+    // ====================================================================
+
+    /// <summary>Tasa CSS empleado: 9.75% del salario base sujeto a CSS.</summary>
+    public const decimal CssTasaEmpleado = 0.0975m;
+
+    /// <summary>
+    /// Tasa CSS patronal vigente 2026: 13.25% (Ley 51/2005 Art. 96.2.a, modif. Ley 462).
+    /// Sube a 14.25% (mar-2027) y 15.25% (mar-2029). El motor de planilla resuelve la tasa
+    /// por fecha vía IPayrollConfigProvider; esta constante la consume el cálculo de
+    /// liquidaciones para el CSS patronal de vacaciones/décimo del período en curso.
+    /// </summary>
+    public const decimal CssTasaPatronal = 0.1325m;
+
+    /// <summary>Tasa Seguro Educativo empleado: 1.25%.</summary>
+    public const decimal SeTasaEmpleado = 0.0125m;
+
+    /// <summary>Tasa Seguro Educativo patronal: 1.50%.</summary>
+    public const decimal SeTasaPatronal = 0.015m;
+
+    /// <summary>
+    /// Tasa CSS empleado aplicable al décimo tercer mes: 7.25%.
+    /// Base legal: Art. 59, Ley 29 de 1976 (tasa reducida para el décimo).
+    /// Distinta a la tasa CSS regular del 9.75%.
+    /// </summary>
+    public const decimal CssTasaDecimoEmpleado = 0.0725m;
+
+    /// <summary>
+    /// Tasa CSS patronal aplicable al décimo tercer mes: 10.75%.
+    /// Base legal: Art. 59, Ley 29 de 1976 (tasa reducida para el décimo).
+    /// Distinta a la tasa CSS patronal regular del 12.25%.
+    /// </summary>
+    public const decimal CssTasaDecimoPatronal = 0.1075m;
+
+    // ====================================================================
 
     /// <summary>
     /// Obtiene el número de períodos por año para una frecuencia de pago dada.
@@ -44,5 +90,20 @@ public static class PayrollConstants
         }
 
         return periods;
+    }
+
+    /// <summary>
+    /// Obtiene períodos/año desde el enum PayPeriodType.
+    /// </summary>
+    public static int GetPeriodsPerYear(PayPeriodType periodType)
+    {
+        return periodType switch
+        {
+            PayPeriodType.Semanal => 52,
+            PayPeriodType.Bisemanal => 26,
+            PayPeriodType.Quincenal => 24,
+            PayPeriodType.Mensual => 12,
+            _ => throw new ArgumentException($"Tipo de período inválido: {periodType}")
+        };
     }
 }

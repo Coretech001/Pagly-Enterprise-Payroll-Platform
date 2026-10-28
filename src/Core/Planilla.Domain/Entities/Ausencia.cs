@@ -1,16 +1,21 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa una ausencia laboral de un empleado
 /// </summary>
-public class Ausencia
+public class Ausencia : ITenantEntity
 {
     public int Id { get; set; }
     public int EmpleadoId { get; set; }
     public Empleado Empleado { get; set; } = null!;
-    public int CompanyId { get; set; }
+
+    /// <summary>
+    /// ID del tenant al que pertenece esta ausencia
+    /// </summary>
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Tipo de ausencia
@@ -72,4 +77,7 @@ public class Ausencia
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

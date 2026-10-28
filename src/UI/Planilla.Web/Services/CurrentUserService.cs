@@ -7,9 +7,9 @@
 // ====================================================================
 
 using System.Security.Claims;
-using Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.Interfaces;
 
-namespace Planilla.Web.Services;
+namespace Vorluno.Planilla.Web.Services;
 
 /// <summary>
 /// Implementación de ICurrentUserService que obtiene información del usuario
@@ -82,5 +82,32 @@ public class CurrentUserService : ICurrentUserService
         {
             return _httpContextAccessor.HttpContext?.User?.Identity?.IsAuthenticated ?? false;
         }
+    }
+
+    // ====================================================================
+    // EMPLOYEE SELF-SERVICE: Métodos para detectar empleados vinculados
+    // ====================================================================
+
+    public int? GetTenantId()
+    {
+        var tenantIdClaim = _httpContextAccessor.HttpContext?.User?.FindFirstValue("tenant_id");
+        return int.TryParse(tenantIdClaim, out var tenantId) ? tenantId : null;
+    }
+
+    public int? GetLinkedEmployeeId()
+    {
+        var employeeIdClaim = _httpContextAccessor.HttpContext?.User?.FindFirstValue("employee_id");
+        return int.TryParse(employeeIdClaim, out var employeeId) ? employeeId : null;
+    }
+
+    public bool IsLinkedEmployee()
+    {
+        return GetLinkedEmployeeId().HasValue;
+    }
+
+    public bool IsOwner()
+    {
+        var roleClaim = _httpContextAccessor.HttpContext?.User?.FindFirstValue("tenant_role");
+        return roleClaim == "Owner" || roleClaim == "0";
     }
 }

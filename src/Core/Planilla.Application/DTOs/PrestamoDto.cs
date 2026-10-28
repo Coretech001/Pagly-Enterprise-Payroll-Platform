@@ -1,6 +1,6 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
 
-namespace Planilla.Application.DTOs;
+namespace Vorluno.Planilla.Application.DTOs;
 
 /// <summary>
 /// DTO para visualización de préstamos con información calculada.
@@ -22,5 +22,7 @@ public record PrestamoDto(
     EstadoPrestamo Estado,
     string EstadoNombre,  // Nombre legible del estado
     string? Referencia,
-    decimal PorcentajePagado  // Calculado
+    decimal PorcentajePagado,  // Calculado
+    PayPeriodType FrecuenciaCuota,
+    string FrecuenciaCuotaNombre
 );

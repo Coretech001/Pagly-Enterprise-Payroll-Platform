@@ -1,71 +1,158 @@
 // ====================================================================
 // Planilla - PayrollProcessingService
 // Creado: 2025-12-27
-// Actualizado: 2025-12-28 - Integración de asistencia
+// Actualizado: 2026-02-16 - Motor de prelacion con proteccion salario minimo
 // Descripción: Servicio de procesamiento de planilla con deducciones adicionales
 // Integra préstamos, deducciones fijas, anticipos, horas extra, ausencias y vacaciones
 // ====================================================================
 
 using Microsoft.EntityFrameworkCore;
-using Planilla.Application.Services;
-using Planilla.Domain.Entities;
-using Planilla.Domain.Enums;
-using Planilla.Infrastructure.Data;
-using Planilla.Infrastructure.Services;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Helpers;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.Results;
+using Vorluno.Planilla.Application.Services;
+using Vorluno.Planilla.Domain.Entities;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Infrastructure.Data;
+using Vorluno.Planilla.Infrastructure.Services;
 
-namespace Planilla.Infrastructure.Services;
+namespace Vorluno.Planilla.Infrastructure.Services;
 
 /// <summary>
 /// Servicio que procesa planillas completas incluyendo deducciones adicionales
-/// y conceptos de asistencia (horas extra, ausencias, vacaciones).
+/// con motor de prelacion legal y proteccion de salario minimo.
 /// </summary>
 public class PayrollProcessingService
 {
     private readonly ApplicationDbContext _context;
     private readonly PayrollCalculationOrchestratorPortable _orchestrator;
-    private readonly AsistenciaCalculationService _asistenciaService;
+    private readonly IAsistenciaCalculationService _asistenciaService;
+    private readonly IDeduccionPrioridadEngine _deduccionEngine;
+    private readonly IAcumuladoFiscalService _acumuladoFiscalService;
 
     public PayrollProcessingService(
         ApplicationDbContext context,
         PayrollCalculationOrchestratorPortable orchestrator,
-        AsistenciaCalculationService asistenciaService)
+        IAsistenciaCalculationService asistenciaService,
+        IDeduccionPrioridadEngine deduccionEngine,
+        IAcumuladoFiscalService acumuladoFiscalService)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
         _asistenciaService = asistenciaService ?? throw new ArgumentNullException(nameof(asistenciaService));
+        _deduccionEngine = deduccionEngine ?? throw new ArgumentNullException(nameof(deduccionEngine));
+        _acumuladoFiscalService = acumuladoFiscalService ?? throw new ArgumentNullException(nameof(acumuladoFiscalService));
+    }
+
+    // ====================================================================
+    // ISR por método acumulativo
+    // ====================================================================
+
+    /// <summary>
+    /// Recalcula el ISR de un resultado ya calculado usando el motor acumulativo,
+    /// que compara el impuesto que el empleado debería llevar retenido a la fecha
+    /// contra el que ya se le retuvo y cobra solo la diferencia.
+    ///
+    /// Se hace después del orquestador y no dentro porque la base gravable es el
+    /// bruto menos el Seguro Social, y el Seguro Social sale de ese mismo cálculo.
+    /// </summary>
+    private async Task<(PayrollCalculationResult resultado, decimal isrGastoRepresentacion)>
+        AplicarIsrAcumulativoAsync(
+            PayrollCalculationResult resultado,
+            Empleado empleado,
+            PayPeriodType frecuencia,
+            DateTime fechaPago,
+            int payrollHeaderId,
+            decimal gastoRepresentacionPeriodo,
+            CancellationToken cancellationToken = default)
+    {
+        if (!empleado.IsSubjectToIncomeTax)
+            return (resultado, 0m);
+
+        var anio = fechaPago.Year;
+
+        var acumulado = await _acumuladoFiscalService.ObtenerAcumuladoAsync(
+            empleado.Id, anio, excluirPayrollHeaderId: payrollHeaderId,
+            cancellationToken: cancellationToken);
+
+        var numeroPeriodo = await _acumuladoFiscalService.ObtenerNumeroPeriodoAsync(
+            empleado.Id, anio, excluirPayrollHeaderId: payrollHeaderId,
+            cancellationToken: cancellationToken);
+
+        // El gasto de representación viaja dentro del bruto porque para la Caja de
+        // Seguro Social es salario (Ley 51 de 2005, Art. 91 num. 6), pero la renta
+        // lo grava aparte: hay que separarlo antes de proyectar.
+        var gastoRepresentacion = Math.Min(gastoRepresentacionPeriodo, resultado.GrossPay);
+
+        // La base es el BRUTO del período, sin restar nada —ni el Seguro Social—.
+        // Es el criterio del contador y es como está armado su libro: la columna
+        // ACUMULADO suma salarios, vacaciones, extras, comisión y décimo tal cual.
+        var gravablePeriodo = resultado.GrossPay - gastoRepresentacion;
+
+        var movimientos = new List<MovimientoIsr>
+        {
+            new(TratamientoIsr.GravableAcumulable, gravablePeriodo)
+        };
+
+        if (gastoRepresentacion > 0m)
+            movimientos.Add(new MovimientoIsr(TratamientoIsr.GastoRepresentacion, gastoRepresentacion));
+
+        var isr = MotorIsrPanama.Calcular(new CorridaIsr
+        {
+            Frecuencia = frecuencia,
+            NumeroPeriodoEmpleado = numeroPeriodo,
+            AcumuladoAnterior = acumulado,
+            Movimientos = movimientos
+        });
+
+        // El comprobante muestra una sola retención de renta: la del salario más la
+        // del gasto de representación.
+        var incomeTax = isr.IsrTotalDescontarPeriodo;
+
+        // El orquestador ya sumó su propio ISR en los totales; se rehacen con el nuevo.
+        var totalDeductions = resultado.CssEmployee
+                            + resultado.EducationalInsuranceEmployee
+                            + incomeTax;
+
+        var ajustado = resultado with
+        {
+            IncomeTax = incomeTax,
+            TotalDeductions = totalDeductions,
+            NetPay = resultado.GrossPay - totalDeductions
+        };
+
+        return (ajustado, isr.IsrGastoRepresentacionPeriodo);
     }
 
     /// <summary>
     /// Calcula la planilla para un empleado específico incluyendo deducciones adicionales
-    /// y conceptos de asistencia (horas extra, ausencias, vacaciones).
+    /// con prelacion legal, proteccion de salario minimo, y conceptos de asistencia.
     /// </summary>
-    public async Task<(PayrollDetail detail, List<int> prestamoIds, List<int> anticipoIds, List<HoraExtra> horasExtra, List<Ausencia> ausencias, List<SolicitudVacaciones> vacaciones)> CalculateForEmployeeAsync(
+    public async Task<(PayrollDetail detail, List<int> prestamoIds, List<int> anticipoIds, List<HoraExtra> horasExtra, List<Ausencia> ausencias, List<SolicitudVacaciones> vacaciones, DeduccionesResult deduccionesResult)> CalculateForEmployeeAsync(
         int companyId,
         Empleado empleado,
         DateTime payrollPeriodStart,
         DateTime payrollPeriodEnd,
-        int payrollHeaderId)
+        int payrollHeaderId,
+        TipoPlanilla tipoPlanilla = TipoPlanilla.Regular)
     {
         // ====================================================================
         // PASO 1: Calcular conceptos de asistencia
         // ====================================================================
 
-        // Calcular salario hora y diario para conceptos de asistencia
         decimal salarioMensual = empleado.SalarioBase;
-        decimal salarioHora = _asistenciaService.CalcularSalarioHora(salarioMensual, 48);
+        decimal salarioHora = _asistenciaService.CalcularSalarioHora(salarioMensual, empleado.HoursPerWeek);
         decimal salarioDiario = _asistenciaService.CalcularSalarioDiario(salarioMensual);
 
-        // Horas extra aprobadas del período
         var horasExtra = await _asistenciaService.GetHorasExtraAprobadas(empleado.Id, payrollPeriodStart, payrollPeriodEnd);
         var (montoHorasExtra, horasDiurnas, horasNocturnas, horasDomingoFeriado) =
             await _asistenciaService.CalcularMontoHorasExtra(empleado.Id, salarioHora, payrollPeriodStart, payrollPeriodEnd);
 
-        // Ausencias del período que afectan salario
         var ausencias = await _asistenciaService.GetAusenciasDelPeriodo(empleado.Id, payrollPeriodStart, payrollPeriodEnd);
         var (descuentoAusencias, diasAusencia) =
             await _asistenciaService.CalcularDescuentoAusencias(empleado.Id, salarioDiario, payrollPeriodStart, payrollPeriodEnd);
 
-        // Vacaciones del período
         var vacaciones = await _asistenciaService.GetVacacionesDelPeriodo(empleado.Id, payrollPeriodStart, payrollPeriodEnd);
         var (montoVacaciones, diasVacaciones) =
             await _asistenciaService.CalcularVacaciones(empleado.Id, salarioDiario, payrollPeriodStart, payrollPeriodEnd);
@@ -74,34 +161,79 @@ public class PayrollProcessingService
         // PASO 2: Calcular GrossPay ajustado con asistencia
         // ====================================================================
 
-        // GrossPay ajustado = salarioBase + horasExtra - ausencias
-        // (Las vacaciones ya están incluidas en el salario base en Panamá)
-        decimal grossPayAjustado = empleado.SalarioBase + montoHorasExtra - descuentoAusencias;
+        var horasRegistradas = await _context.PayrollEmployeeHours
+            .FirstOrDefaultAsync(h => h.PayrollHeaderId == payrollHeaderId && h.EmpleadoId == empleado.Id);
+        decimal comisiones = horasRegistradas?.Commissions ?? 0m;
+
+        decimal salarioPeriodo = empleado.GetSalarioPeriodo();
+
+        // El gasto de representación entra al bruto: para la Caja de Seguro Social
+        // es salario. La renta lo separa después, con su propia tarifa.
+        decimal gastoRepresentacion = empleado.GetGastoRepresentacionPeriodo();
+        decimal grossPayAjustado = salarioPeriodo + gastoRepresentacion
+                                 + montoHorasExtra - descuentoAusencias + comisiones;
+        decimal isrGastoRepresentacion = 0m;
 
         // ====================================================================
-        // PASO 3: Calcular deducciones básicas (CSS, SE, ISR)
+        // PASO 3: Calcular deducciones legales (CSS, SE, ISR)
         // ====================================================================
 
-        var payrollResult = await _orchestrator.CalculateEmployeePayrollAsync(
-            companyId,
-            grossPayAjustado,  // Usar salario ajustado con asistencia
-            "Quincenal", // TODO: Obtener de configuración del empleado
-            0, // TODO: Obtener años cotizados del empleado
-            grossPayAjustado, // TODO: Obtener promedio últimos 10 años
-            0.56m, // TODO: Obtener nivel de riesgo del empleado
-            0, // TODO: Obtener dependientes del empleado
-            true, // isSubjectToCss
-            true, // isSubjectToEducationalInsurance
-            true, // isSubjectToIncomeTax
-            payrollPeriodStart
-        );
+        PayrollCalculationResult payrollResult;
+        if (tipoPlanilla == TipoPlanilla.SinDeducciones)
+        {
+            // Sin deducciones legales: CSS, SE, ISR = 0
+            payrollResult = new PayrollCalculationResult(
+                GrossPay: grossPayAjustado,
+                CssEmployee: 0, EducationalInsuranceEmployee: 0, IncomeTax: 0,
+                TotalDeductions: 0, NetPay: grossPayAjustado,
+                CssEmployer: 0, EducationalInsuranceEmployer: 0,
+                RiskContribution: 0, TotalEmployerCost: 0);
+        }
+        else
+        {
+            payrollResult = await _orchestrator.CalculateEmployeePayrollAsync(
+                companyId,
+                grossPayAjustado,
+                empleado.PayFrequency,
+                empleado.YearsCotized,
+                empleado.AverageSalaryLast10Years > 0 ? empleado.AverageSalaryLast10Years : grossPayAjustado,
+                empleado.CssRiskPercentage,
+                empleado.Dependents,
+                empleado.IsSubjectToCss,
+                empleado.IsSubjectToEducationalInsurance,
+                empleado.IsSubjectToIncomeTax,
+                payrollPeriodStart
+            );
+
+            // El ISR del orquestador es una proyección del período suelto; el que
+            // manda es el acumulativo, que mira el año completo del empleado.
+            var cabecera = await _context.PayrollHeaders
+                .AsNoTracking()
+                .Where(h => h.Id == payrollHeaderId)
+                .Select(h => new { h.PayDate, h.PayPeriodType })
+                .FirstOrDefaultAsync();
+
+            (payrollResult, isrGastoRepresentacion) = await AplicarIsrAcumulativoAsync(
+                payrollResult,
+                empleado,
+                cabecera?.PayPeriodType ?? empleado.PayPeriodType,
+                cabecera?.PayDate ?? payrollPeriodEnd,
+                payrollHeaderId,
+                gastoRepresentacion);
+        }
 
         // ====================================================================
-        // PASO 4: Calcular deducciones adicionales (préstamos, deducciones fijas, anticipos)
+        // PASO 4: Calcular deducciones adicionales con motor de prelacion
         // ====================================================================
 
-        var (deduccionesFijas, prestamos, anticipos, prestamoIds, anticipoIds) =
-            await GetDeduccionesAdicionalesAsync(empleado.Id, payrollPeriodStart);
+        decimal netoPostLegal = grossPayAjustado
+            - payrollResult.CssEmployee
+            - payrollResult.EducationalInsuranceEmployee
+            - payrollResult.IncomeTax;
+
+        var deduccionesResult = await GetDeduccionesAdicionalesConPrelacionAsync(
+            empleado.Id, grossPayAjustado, netoPostLegal,
+            empleado.PayPeriodType, payrollPeriodStart, payrollPeriodEnd);
 
         // ====================================================================
         // PASO 5: Calcular totales
@@ -110,12 +242,9 @@ public class PayrollProcessingService
         decimal totalDeductions = payrollResult.CssEmployee +
                                   payrollResult.EducationalInsuranceEmployee +
                                   payrollResult.IncomeTax +
-                                  deduccionesFijas +
-                                  prestamos +
-                                  anticipos +
-                                  descuentoAusencias; // Las ausencias también son deducción
+                                  deduccionesResult.TotalDeduccionesAdicionales;
 
-        decimal netPay = grossPayAjustado - totalDeductions + descuentoAusencias; // Compensar ausencias ya restadas del bruto
+        decimal netPay = grossPayAjustado - totalDeductions;
 
         // ====================================================================
         // PASO 6: Crear el detalle de planilla con todos los conceptos
@@ -126,38 +255,46 @@ public class PayrollProcessingService
             PayrollHeaderId = payrollHeaderId,
             EmpleadoId = empleado.Id,
 
-            // Salario bruto (ya incluye ajustes de asistencia)
+            // Salario bruto
             GrossPay = grossPayAjustado,
             BaseSalary = empleado.SalarioBase,
             OvertimePay = montoHorasExtra,
-            Bonuses = 0, // TODO: Calcular bonificaciones
-            Commissions = 0, // TODO: Calcular comisiones
+            Bonuses = 0,
+            Commissions = comisiones,
 
-            // Deducciones básicas
+            // Deducciones legales
             CssEmployee = payrollResult.CssEmployee,
             CssEmployer = payrollResult.CssEmployer,
             RiskContribution = payrollResult.RiskContribution,
             EducationalInsuranceEmployee = payrollResult.EducationalInsuranceEmployee,
             EducationalInsuranceEmployer = payrollResult.EducationalInsuranceEmployer,
             IncomeTax = payrollResult.IncomeTax,
+            GastoRepresentacion = gastoRepresentacion,
+            IsrGastoRepresentacion = isrGastoRepresentacion,
 
-            // Deducciones adicionales
+            // Deducciones adicionales - totales legacy
             OtherDeductions = 0,
-            DeduccionesFijas = deduccionesFijas,
-            Prestamos = prestamos,
-            Anticipos = anticipos,
+            DeduccionesFijas = deduccionesResult.TotalDeduccionesAdicionales - deduccionesResult.TotalPrestamos - deduccionesResult.TotalAnticipos,
+            Prestamos = deduccionesResult.TotalPrestamos,
+            Anticipos = deduccionesResult.TotalAnticipos,
 
-            // Asistencia: Horas Extra
+            // Deducciones adicionales - desglose por categoria
+            PensionAlimenticia = deduccionesResult.TotalPensionAlimenticia,
+            Embargos = deduccionesResult.TotalEmbargos,
+            DeduccionesVoluntarias = deduccionesResult.TotalVoluntarias,
+            SalarioMinimoLegalAplicado = deduccionesResult.SalarioMinimoAplicado,
+            MontoLimitadoPorSalarioMinimo = deduccionesResult.MontoLimitadoPorSalarioMinimo,
+            TuvoLimitacionSalarioMinimo = deduccionesResult.TuvoLimitacion,
+
+            // Asistencia
             HorasExtraDiurnas = horasDiurnas,
             HorasExtraNocturnas = horasNocturnas,
             HorasExtraDomingoFeriado = horasDomingoFeriado,
             MontoHorasExtra = montoHorasExtra,
-
-            // Asistencia: Ausencias
+            HorasExtraExceso = horasRegistradas?.OvertimeExcessHours ?? 0m,
+            MontoHorasExtraExceso = horasRegistradas?.OvertimeExcessPay ?? 0m,
             DiasAusenciaInjustificada = diasAusencia,
             MontoDescuentoAusencias = descuentoAusencias,
-
-            // Asistencia: Vacaciones
             DiasVacaciones = diasVacaciones,
             MontoVacaciones = montoVacaciones,
 
@@ -169,52 +306,345 @@ public class PayrollProcessingService
             CreatedAt = DateTime.UtcNow
         };
 
-        return (detail, prestamoIds, anticipoIds, horasExtra, ausencias, vacaciones);
+        return (detail, deduccionesResult.PrestamoIds, deduccionesResult.AnticipoIds, horasExtra, ausencias, vacaciones, deduccionesResult);
     }
 
     /// <summary>
-    /// Obtiene y calcula todas las deducciones adicionales aplicables a un empleado en una fecha específica
+    /// DEV-35: Calcula el detalle de planilla para un empleado usando datos pre-cargados en memoria.
+    /// Elimina N+1 queries del loop de cálculo. El controller pre-carga los datos antes del loop
+    /// y llama a este método por empleado.
     /// </summary>
-    private async Task<(decimal deduccionesFijas, decimal prestamos, decimal anticipos, List<int> prestamoIds, List<int> anticipoIds)>
-        GetDeduccionesAdicionalesAsync(int empleadoId, DateTime fechaPlanilla)
+    public async Task<(PayrollDetail detail, DeduccionesResult deduccionesResult)> CalculateFromPreloadedDataAsync(
+        int tenantId,
+        Empleado employee,
+        PayrollHeader payrollHeader,
+        PayrollEmployeeHours? hours,
+        List<DeduccionFija> deduccionesFijas,
+        List<Prestamo> prestamosActivos,
+        List<Anticipo> anticiposAprobados,
+        decimal salarioMinimoPeriodo,
+        decimal fraccionSalario = 1m)
     {
-        decimal totalDeduccionesFijas = 0;
-        decimal totalPrestamos = 0;
-        decimal totalAnticipos = 0;
-        var prestamoIds = new List<int>();
-        var anticipoIds = new List<int>();
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payrollHeader.PayPeriodType);
+
+        // Parte del período con salario: menos de 1 cuando hay días de licencia
+        // de maternidad (esos días los paga la CSS, no la planilla). Con 1, el
+        // salario del período queda exactamente como siempre.
+        decimal salarioPeriodo = fraccionSalario >= 1m
+            ? employee.GetSalarioPeriodo()
+            : RoundingPolicy.Round(employee.GetSalarioPeriodo() * Math.Max(0m, fraccionSalario));
 
         // ====================================================================
-        // 1. Obtener deducciones fijas activas
+        // PASO 1: Calcular GrossPay
         // ====================================================================
-        var deducciones = await _context.DeduccionesFijas
-            .Where(d => d.EmpleadoId == empleadoId &&
-                        d.EstaActivo &&
-                        d.FechaInicio <= fechaPlanilla &&
-                        (d.FechaFin == null || d.FechaFin >= fechaPlanilla))
-            .OrderBy(d => d.Prioridad)
-            .ToListAsync();
+        decimal grossPay = salarioPeriodo;
 
-        foreach (var deduccion in deducciones)
+        if (hours != null)
         {
-            if (deduccion.EsPorcentaje && deduccion.Porcentaje.HasValue)
+            // DEV-90: Validar que ningún tipo de hora sea negativo (dato corrupto en BD).
+            if (hours.RegularHours < 0 || hours.SundayHours < 0 || hours.HolidayHours < 0)
             {
-                // Calcular porcentaje sobre salario bruto
-                var empleado = await _context.Empleados.FindAsync(empleadoId);
-                if (empleado != null)
-                {
-                    totalDeduccionesFijas += empleado.SalarioBase * (deduccion.Porcentaje.Value / 100);
-                }
+                throw new InvalidOperationException(
+                    $"Las horas no pueden ser negativas para el empleado {employee.Id}. " +
+                    $"Regular={hours.RegularHours}, Domingo={hours.SundayHours}, Feriado={hours.HolidayHours}.");
             }
-            else
+
+            // DEV-87: SundayHours y HolidayHours deben ser subconjuntos de RegularHours.
+            // Si superan el total, el cálculo de GrossPay sería incorrecto silenciosamente.
+            if (hours.SundayHours + hours.HolidayHours > hours.RegularHours)
             {
-                totalDeduccionesFijas += deduccion.Monto;
+                throw new InvalidOperationException(
+                    $"Las horas de domingo ({hours.SundayHours}) + feriado ({hours.HolidayHours}) " +
+                    $"no pueden exceder las horas regulares totales ({hours.RegularHours}) " +
+                    $"para el empleado {employee.Id}.");
             }
+
+            var hourlyRate = employee.HourlyRate > 0
+                ? employee.HourlyRate
+                : Empleado.ComputeHourlyRateFromMonthly(employee.SalarioBase, employee.HoursPerWeek);
+
+            // DEV-92: RegularPay incluye TODAS las horas (incluyendo domingo y feriado) a tasa base 1.0x.
+            // Las 104 horas regulares ya contienen el pago base de cada día trabajado; domingo y feriado
+            // solo añaden el recargo adicional (0.50x y 1.50x respectivamente).
+            // Con licencia de maternidad en el período solo se paga la parte trabajada.
+            hours.RegularPay = hours.RegularHours * hourlyRate * Math.Clamp(fraccionSalario, 0m, 1m);
+            // Snap a salario exacto cuando no hay horas especiales (evita diferencia de centavos por redondeo)
+            if (hours.SundayHours == 0 && hours.HolidayHours == 0)
+            {
+                var salarioPeriodoExacto = salarioPeriodo;
+                if (Math.Abs(hours.RegularPay - salarioPeriodoExacto) < 0.05m)
+                    hours.RegularPay = salarioPeriodoExacto;
+            }
+
+            hours.SundayPay = hours.SundayHours * hourlyRate * 0.50m;   // Art. 26: recargo 50% (base ya pagada en RegularPay)
+            hours.HolidayPay = hours.HolidayHours * hourlyRate * 1.50m; // Art. 49: recargo 150% (base ya pagada en RegularPay)
+            hours.OvertimeDayPay = hours.OvertimeDayHours * hourlyRate * 1.25m;
+            hours.OvertimeNightPay = hours.OvertimeNightHours * hourlyRate * 1.50m;
+            hours.OvertimeHolidayPay = hours.OvertimeHolidayHours * hourlyRate * 3.125m;
+            // DEV-27: Mixta 1.50x (D→N). Para 1.75x (N→D) haría falta campo/convención en PayrollEmployeeHours.
+            hours.OvertimeMixedPay = hours.OvertimeMixedHours * hourlyRate * 1.50m;
+            hours.OvertimeExcessPay = hours.OvertimeExcessHours * hourlyRate * 2.1875m;
+            hours.AbsenceDeduction = hours.AbsenceHours * hourlyRate;
+            hours.TotalHoursPay = hours.RegularPay + hours.SundayPay + hours.HolidayPay
+                + hours.OvertimeDayPay + hours.OvertimeNightPay
+                + hours.OvertimeHolidayPay + hours.OvertimeMixedPay + hours.OvertimeExcessPay
+                - hours.AbsenceDeduction;
+            hours.UpdatedAt = DateTime.UtcNow;
+
+            grossPay = hours.TotalHoursPay + hours.Commissions;
+        }
+
+        // El gasto de representación entra al bruto: para la Caja de Seguro Social
+        // es salario. La renta lo separa después, con su propia tarifa.
+        decimal gastoRepresentacion = fraccionSalario >= 1m
+            ? employee.GetGastoRepresentacionPeriodo()
+            : RoundingPolicy.Round(employee.GetGastoRepresentacionPeriodo() * Math.Max(0m, fraccionSalario));
+        grossPay += gastoRepresentacion;
+        decimal isrGastoRepresentacion = 0m;
+
+        // ====================================================================
+        // PASO 2: Deducciones legales CSS + SE + ISR
+        // DEV-24 FIX: usar PayPeriodType de la planilla, no PayFrequency del empleado
+        // ====================================================================
+        PayrollCalculationResult calculationResult;
+        if (payrollHeader.TipoPlanilla == TipoPlanilla.SinDeducciones)
+        {
+            // Sin deducciones legales: CSS, SE, ISR = 0
+            calculationResult = new PayrollCalculationResult(
+                GrossPay: grossPay,
+                CssEmployee: 0, EducationalInsuranceEmployee: 0, IncomeTax: 0,
+                TotalDeductions: 0, NetPay: grossPay,
+                CssEmployer: 0, EducationalInsuranceEmployer: 0,
+                RiskContribution: 0, TotalEmployerCost: 0);
+        }
+        else
+        {
+            calculationResult = await _orchestrator.CalculateEmployeePayrollAsync(
+                companyId: tenantId,
+                grossPay: grossPay,
+                payFrequency: payrollHeader.PayPeriodType.ToString(),
+                yearsCotized: employee.YearsCotized,
+                averageSalaryLast10Years: employee.AverageSalaryLast10Years,
+                cssRiskPercentage: employee.CssRiskPercentage,
+                dependents: employee.Dependents,
+                isSubjectToCss: employee.IsSubjectToCss,
+                isSubjectToEducationalInsurance: employee.IsSubjectToEducationalInsurance,
+                isSubjectToIncomeTax: employee.IsSubjectToIncomeTax,
+                calculationDate: DateTime.UtcNow
+            );
+
+            (calculationResult, isrGastoRepresentacion) = await AplicarIsrAcumulativoAsync(
+                calculationResult,
+                employee,
+                payrollHeader.PayPeriodType,
+                payrollHeader.PayDate,
+                payrollHeader.Id,
+                gastoRepresentacion);
         }
 
         // ====================================================================
-        // 2. Obtener préstamos activos con cuotas pendientes
+        // PASO 3: Deducciones adicionales con motor de prelación (datos pre-cargados)
         // ====================================================================
+        decimal netoPostLegal = grossPay
+            - calculationResult.CssEmployee
+            - calculationResult.EducationalInsuranceEmployee
+            - calculationResult.IncomeTax;
+
+        var deduccionesPendientes = new List<DeduccionPendiente>();
+
+        foreach (var df in deduccionesFijas)
+        {
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenDeduccionFijaId = df.Id,
+                TipoDeduccion = df.TipoDeduccion,
+                Categoria = InferirCategoria(df),
+                Descripcion = df.Descripcion,
+                MontoFijo = RoundingPolicy.Round(df.Monto * 12m / periodsPerYear),
+                Porcentaje = df.Porcentaje,
+                EsPorcentaje = df.EsPorcentaje,
+                BaseCalculo = df.BaseCalculo,
+                Prioridad = df.Prioridad,
+                NombreAcreedor = df.NombreAcreedor,
+                MontoTotalACobrar = df.MontoTotalACobrar,
+                MontoCobradoAcumulado = df.MontoCobradoAcumulado
+            });
+        }
+
+        foreach (var prestamo in prestamosActivos)
+        {
+            var loanPeriodsPerYear = PayrollConstants.GetPeriodsPerYear(prestamo.FrecuenciaCuota);
+            var montoCuotaPeriodo = Math.Round(prestamo.CuotaMensual * loanPeriodsPerYear / periodsPerYear, 2);
+            montoCuotaPeriodo = Math.Min(montoCuotaPeriodo, prestamo.MontoPendiente);
+
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenPrestamoId = prestamo.Id,
+                TipoDeduccion = TipoDeduccion.PrestamoInterno,
+                Categoria = CategoriaDeduccion.Voluntaria,
+                Descripcion = $"Prestamo #{prestamo.Id} - Cuota {prestamo.CuotasPagadas + 1}/{prestamo.NumeroCuotas}",
+                MontoFijo = montoCuotaPeriodo,
+                EsPorcentaje = false,
+                BaseCalculo = BaseCalculoDeduccion.SalarioBruto,
+                Prioridad = 100
+            });
+        }
+
+        foreach (var anticipo in anticiposAprobados)
+        {
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenAnticipoId = anticipo.Id,
+                TipoDeduccion = TipoDeduccion.Otro,
+                Categoria = CategoriaDeduccion.Voluntaria,
+                Descripcion = $"Anticipo #{anticipo.Id} - {anticipo.Motivo}",
+                MontoFijo = anticipo.Monto,
+                EsPorcentaje = false,
+                BaseCalculo = BaseCalculoDeduccion.SalarioBruto,
+                Prioridad = 200
+            });
+        }
+
+        var deduccionesResult = _deduccionEngine.AplicarDeduccionesConPrelacion(
+            grossPay, netoPostLegal, salarioMinimoPeriodo, deduccionesPendientes);
+
+        // ====================================================================
+        // PASO 4: Horas extra aprobadas del período (desde asistenciaService)
+        // ====================================================================
+        decimal overtimePay = 0m;
+        decimal horasExtraDiurnas = 0m;
+        decimal horasExtraNocturnas = 0m;
+        decimal horasExtraDomingoFeriado = 0m;
+
+        var horasExtraAprobadas = await _asistenciaService.GetHorasExtraAprobadas(
+            employee.Id, payrollHeader.PeriodStartDate, payrollHeader.PeriodEndDate);
+
+        if (horasExtraAprobadas.Any())
+        {
+            var salarioHora = employee.HourlyRate > 0
+                ? employee.HourlyRate
+                : Empleado.ComputeHourlyRateFromMonthly(employee.SalarioBase, employee.HoursPerWeek);
+
+            var (montoHorasExtra, horasDiurnas, horasNocturnas, horasDomFeriado) =
+                await _asistenciaService.CalcularMontoHorasExtra(
+                    employee.Id, salarioHora, payrollHeader.PeriodStartDate, payrollHeader.PeriodEndDate);
+
+            overtimePay = montoHorasExtra;
+            horasExtraDiurnas = horasDiurnas;
+            horasExtraNocturnas = horasNocturnas;
+            horasExtraDomingoFeriado = horasDomFeriado;
+        }
+        else if (hours != null)
+        {
+            overtimePay = hours.OvertimeDayPay + hours.OvertimeNightPay;
+            horasExtraDiurnas = hours.OvertimeDayHours;
+            horasExtraNocturnas = hours.OvertimeNightHours;
+        }
+
+        // ====================================================================
+        // PASO 5: Construir PayrollDetail
+        // ====================================================================
+        decimal totalDedsForEmployee = calculationResult.TotalDeductions + deduccionesResult.TotalDeduccionesAdicionales;
+        decimal netPayForEmployee = calculationResult.NetPay - deduccionesResult.TotalDeduccionesAdicionales;
+
+        var detail = new PayrollDetail
+        {
+            PayrollHeaderId = payrollHeader.Id,
+            EmpleadoId = employee.Id,
+            GrossPay = calculationResult.GrossPay,
+            BaseSalary = employee.SalarioBase,
+            OvertimePay = overtimePay,
+            Bonuses = 0,
+            Commissions = hours?.Commissions ?? 0,
+            HorasExtraDiurnas = horasExtraDiurnas,
+            HorasExtraNocturnas = horasExtraNocturnas,
+            HorasExtraDomingoFeriado = horasExtraDomingoFeriado,
+            MontoHorasExtra = overtimePay,
+            HorasExtraExceso = hours?.OvertimeExcessHours ?? 0m,
+            MontoHorasExtraExceso = hours?.OvertimeExcessPay ?? 0m,
+            CssEmployee = calculationResult.CssEmployee,
+            CssEmployer = calculationResult.CssEmployer,
+            RiskContribution = calculationResult.RiskContribution,
+            EducationalInsuranceEmployee = calculationResult.EducationalInsuranceEmployee,
+            EducationalInsuranceEmployer = calculationResult.EducationalInsuranceEmployer,
+            IncomeTax = calculationResult.IncomeTax,
+            GastoRepresentacion = gastoRepresentacion,
+            IsrGastoRepresentacion = isrGastoRepresentacion,
+            OtherDeductions = 0,
+            DeduccionesFijas = deduccionesResult.TotalDeduccionesAdicionales - deduccionesResult.TotalPrestamos - deduccionesResult.TotalAnticipos,
+            Prestamos = deduccionesResult.TotalPrestamos,
+            Anticipos = deduccionesResult.TotalAnticipos,
+            PensionAlimenticia = deduccionesResult.TotalPensionAlimenticia,
+            Embargos = deduccionesResult.TotalEmbargos,
+            DeduccionesVoluntarias = deduccionesResult.TotalVoluntarias,
+            SalarioMinimoLegalAplicado = deduccionesResult.SalarioMinimoAplicado,
+            MontoLimitadoPorSalarioMinimo = deduccionesResult.MontoLimitadoPorSalarioMinimo,
+            TuvoLimitacionSalarioMinimo = deduccionesResult.TuvoLimitacion,
+            TotalDeductions = totalDedsForEmployee,
+            NetPay = netPayForEmployee,
+            EmployerCost = calculationResult.TotalEmployerCost,
+            TenantId = tenantId
+        };
+
+        return (detail, deduccionesResult);
+    }
+
+    /// <summary>
+    /// Obtiene y calcula todas las deducciones adicionales con motor de prelacion
+    /// y proteccion de salario minimo.
+    /// </summary>
+    private async Task<DeduccionesResult> GetDeduccionesAdicionalesConPrelacionAsync(
+        int empleadoId, decimal grossPay, decimal netoPostLegal,
+        PayPeriodType payPeriodType, DateTime fechaPlanilla, DateTime fechaPlanillaFin)
+    {
+        // Cargar salario minimo legal de la configuracion vigente
+        var taxConfig = await _context.PayrollTaxConfigurations
+            .Where(c => c.IsActive &&
+                        c.EffectiveStartDate <= fechaPlanilla &&
+                        (c.EffectiveEndDate == null || c.EffectiveEndDate >= fechaPlanilla))
+            .OrderByDescending(c => c.EffectiveStartDate)
+            .FirstOrDefaultAsync();
+
+        decimal salarioMinimoMensual = taxConfig?.SalarioMinimoLegal ?? 700.00m;
+        decimal salarioMinimoPeriodo = DeduccionPrioridadEngine.ProrratearSalarioMinimo(salarioMinimoMensual, payPeriodType);
+
+        // Convertir las 3 fuentes a DeduccionPendiente unificado
+        var deduccionesPendientes = new List<DeduccionPendiente>();
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payPeriodType);
+
+        // 1. Deducciones fijas activas (excluir ordenes levantadas)
+        var deduccionesFijas = await _context.DeduccionesFijas
+            .Where(d => d.EmpleadoId == empleadoId &&
+                        d.EstaActivo &&
+                        d.FechaInicio <= fechaPlanilla &&
+                        (d.FechaFin == null || d.FechaFin >= fechaPlanilla) &&
+                        (d.EstadoOrdenJudicial == null || d.EstadoOrdenJudicial != EstadoOrdenJudicial.Levantada))
+            .OrderBy(d => d.Prioridad)
+            .ToListAsync();
+
+        foreach (var df in deduccionesFijas)
+        {
+            // Determinar categoria segun tipo de deduccion
+            var categoria = InferirCategoria(df);
+
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenDeduccionFijaId = df.Id,
+                TipoDeduccion = df.TipoDeduccion,
+                Categoria = categoria,
+                Descripcion = df.Descripcion,
+                MontoFijo = RoundingPolicy.Round(df.Monto * 12m / periodsPerYear),
+                Porcentaje = df.Porcentaje,
+                EsPorcentaje = df.EsPorcentaje,
+                BaseCalculo = df.BaseCalculo,
+                Prioridad = df.Prioridad,
+                NombreAcreedor = df.NombreAcreedor,
+                MontoTotalACobrar = df.MontoTotalACobrar,
+                MontoCobradoAcumulado = df.MontoCobradoAcumulado
+            });
+        }
+
+        // 2. Prestamos activos con cuotas pendientes
         var prestamos = await _context.Prestamos
             .Where(p => p.EmpleadoId == empleadoId &&
                         p.Estado == EstadoPrestamo.Activo &&
@@ -223,63 +653,126 @@ public class PayrollProcessingService
 
         foreach (var prestamo in prestamos)
         {
-            totalPrestamos += prestamo.CuotaMensual;
-            prestamoIds.Add(prestamo.Id);
+            var loanPeriodsPerYear = PayrollConstants.GetPeriodsPerYear(prestamo.FrecuenciaCuota);
+            var montoCuotaPeriodo = Math.Round(prestamo.CuotaMensual * loanPeriodsPerYear / periodsPerYear, 2);
+            montoCuotaPeriodo = Math.Min(montoCuotaPeriodo, prestamo.MontoPendiente);
+
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenPrestamoId = prestamo.Id,
+                TipoDeduccion = TipoDeduccion.PrestamoInterno,
+                Categoria = CategoriaDeduccion.Voluntaria,
+                Descripcion = $"Prestamo #{prestamo.Id} - Cuota {prestamo.CuotasPagadas + 1}/{prestamo.NumeroCuotas}",
+                MontoFijo = montoCuotaPeriodo,
+                EsPorcentaje = false,
+                BaseCalculo = BaseCalculoDeduccion.SalarioBruto,
+                Prioridad = 100,
+                MontoTotalACobrar = prestamo.MontoOriginal,
+                MontoCobradoAcumulado = prestamo.MontoOriginal - prestamo.MontoPendiente
+            });
         }
 
-        // ====================================================================
-        // 3. Obtener anticipos aprobados para esta fecha
-        // ====================================================================
+        // 3. Anticipos aprobados cuya FechaDescuento cae dentro del rango del periodo
         var anticipos = await _context.Anticipos
             .Where(a => a.EmpleadoId == empleadoId &&
                         a.Estado == EstadoAnticipo.Aprobado &&
-                        a.FechaDescuento.Date == fechaPlanilla.Date)
+                        a.FechaDescuento.Date >= fechaPlanilla.Date &&
+                        a.FechaDescuento.Date <= fechaPlanillaFin.Date)
             .ToListAsync();
 
         foreach (var anticipo in anticipos)
         {
-            totalAnticipos += anticipo.Monto;
-            anticipoIds.Add(anticipo.Id);
+            deduccionesPendientes.Add(new DeduccionPendiente
+            {
+                OrigenAnticipoId = anticipo.Id,
+                TipoDeduccion = TipoDeduccion.Otro,
+                Categoria = CategoriaDeduccion.Voluntaria,
+                Descripcion = $"Anticipo #{anticipo.Id} - {anticipo.Motivo}",
+                MontoFijo = anticipo.Monto,
+                EsPorcentaje = false,
+                BaseCalculo = BaseCalculoDeduccion.SalarioBruto,
+                Prioridad = 200
+            });
         }
 
-        return (totalDeduccionesFijas, totalPrestamos, totalAnticipos, prestamoIds, anticipoIds);
+        // Aplicar motor de prelacion
+        return _deduccionEngine.AplicarDeduccionesConPrelacion(
+            grossPay, netoPostLegal, salarioMinimoPeriodo, deduccionesPendientes);
     }
 
     /// <summary>
-    /// Procesa los pagos de préstamos asociados a un detalle de planilla
+    /// Infiere la categoria de prelacion segun el tipo de deduccion.
     /// </summary>
-    public async Task ProcessPrestamosAsync(List<int> prestamoIds, int payrollDetailId, int payrollHeaderId)
+    private static CategoriaDeduccion InferirCategoria(DeduccionFija df)
+    {
+        // Si la categoria fue establecida explicitamente, usarla
+        if (df.Categoria != CategoriaDeduccion.Voluntaria || df.TipoDeduccion == TipoDeduccion.PensionAlimenticia || df.TipoDeduccion == TipoDeduccion.Embargo)
+        {
+            return df.TipoDeduccion switch
+            {
+                TipoDeduccion.PensionAlimenticia => CategoriaDeduccion.PensionAlimenticia,
+                TipoDeduccion.Embargo => CategoriaDeduccion.EmbargoJudicial,
+                // PrestamoBancario con orden judicial es embargo
+                TipoDeduccion.PrestamoBancario when df.NumeroExpediente != null => CategoriaDeduccion.EmbargoJudicial,
+                _ => df.Categoria
+            };
+        }
+
+        return df.Categoria;
+    }
+
+    /// <summary>
+    /// Procesa los pagos de préstamos asociados a un detalle de planilla.
+    /// Usa el monto realmente aplicado (prorrateado por frecuencia de pago) del resultado de deducciones.
+    /// </summary>
+    public async Task ProcessPrestamosAsync(List<int> prestamoIds, int payrollDetailId, int payrollHeaderId, DeduccionesResult deduccionesResult)
+    {
+        var montoPorPrestamo = deduccionesResult.Detalle
+            .Where(d => d.OrigenPrestamoId.HasValue && d.MontoAplicado > 0m)
+            .ToDictionary(d => d.OrigenPrestamoId!.Value, d => d.MontoAplicado);
+        await ProcessPrestamosAsync(prestamoIds, payrollDetailId, payrollHeaderId, montoPorPrestamo);
+    }
+
+    /// <summary>
+    /// Procesa los pagos de préstamos con montos aplicados por préstamo (para flujo Marcar como Pagada desde BD).
+    /// </summary>
+    public async Task ProcessPrestamosAsync(List<int> prestamoIds, int payrollDetailId, int payrollHeaderId, IReadOnlyDictionary<int, decimal> montoAplicadoPorPrestamoId)
     {
         foreach (var prestamoId in prestamoIds)
         {
             var prestamo = await _context.Prestamos.FindAsync(prestamoId);
             if (prestamo == null) continue;
 
-            // Crear registro de pago
+            if (!montoAplicadoPorPrestamoId.TryGetValue(prestamoId, out var montoAplicado) || montoAplicado <= 0m) continue;
+
+            var saldoAnterior = prestamo.MontoPendiente;
+            var saldoNuevo = Math.Max(0m, saldoAnterior - montoAplicado);
+
             var pago = new PagoPrestamo
             {
                 PrestamoId = prestamoId,
                 PlanillaDetailId = payrollDetailId,
                 FechaPago = DateTime.UtcNow,
-                MontoPagado = prestamo.CuotaMensual,
-                SaldoAnterior = prestamo.MontoPendiente,
-                SaldoNuevo = prestamo.MontoPendiente - prestamo.CuotaMensual,
+                MontoPagado = montoAplicado,
+                SaldoAnterior = saldoAnterior,
+                SaldoNuevo = saldoNuevo,
                 NumeroCuota = prestamo.CuotasPagadas + 1,
                 CreatedAt = DateTime.UtcNow
             };
 
             _context.PagosPrestamos.Add(pago);
 
-            // Actualizar préstamo
-            prestamo.MontoPendiente -= prestamo.CuotaMensual;
+            prestamo.MontoPendiente = saldoNuevo;
             prestamo.CuotasPagadas++;
             prestamo.UpdatedAt = DateTime.UtcNow;
 
-            // Si ya pagó todas las cuotas, marcar como pagado
-            if (prestamo.CuotasPagadas >= prestamo.NumeroCuotas)
+            // Solo marcar como Pagado cuando el saldo llega a cero.
+            // No usar CuotasPagadas >= NumeroCuotas como única condición porque cuotas
+            // parciales (por límite 50%) acumularían cuotas sin saldar el saldo real.
+            if (prestamo.MontoPendiente <= 0m)
             {
                 prestamo.Estado = EstadoPrestamo.Pagado;
-                prestamo.MontoPendiente = 0; // Asegurar que quede en 0
+                prestamo.MontoPendiente = 0m;
             }
 
             _context.Prestamos.Update(prestamo);
@@ -298,12 +791,61 @@ public class PayrollProcessingService
             var anticipo = await _context.Anticipos.FindAsync(anticipoId);
             if (anticipo == null) continue;
 
-            // Marcar anticipo como descontado
             anticipo.Estado = EstadoAnticipo.Descontado;
             anticipo.PlanillaId = payrollHeaderId;
             anticipo.UpdatedAt = DateTime.UtcNow;
 
             _context.Anticipos.Update(anticipo);
+        }
+
+        await _context.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Crea registros DeduccionAplicada para auditoria y actualiza MontoCobradoAcumulado.
+    /// </summary>
+    public async Task CreateDeduccionesAplicadasAsync(PayrollDetail detail, DeduccionesResult deduccionesResult)
+    {
+        foreach (var item in deduccionesResult.Detalle)
+        {
+            var deduccionAplicada = new DeduccionAplicada
+            {
+                TenantId = detail.TenantId,
+                PayrollDetailId = detail.Id,
+                DeduccionFijaId = item.OrigenDeduccionFijaId,
+                PrestamoId = item.OrigenPrestamoId,
+                AnticipoId = item.OrigenAnticipoId,
+                TipoDeduccion = item.TipoDeduccion,
+                Categoria = item.Categoria,
+                Descripcion = item.Descripcion,
+                MontoSolicitado = item.MontoSolicitado,
+                MontoAplicado = item.MontoAplicado,
+                MontoLimitado = item.MontoLimitado,
+                RazonLimitacion = item.RazonLimitacion,
+                SaldoDisponibleAntes = item.SaldoDisponibleAntes,
+                SaldoDisponibleDespues = item.SaldoDisponibleDespues,
+                OrdenAplicacion = item.OrdenAplicacion,
+                NombreAcreedor = item.NombreAcreedor,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.DeduccionesAplicadas.Add(deduccionAplicada);
+
+            // Actualizar MontoCobradoAcumulado en DeduccionesFijas con MontoTotalACobrar
+            if (item.OrigenDeduccionFijaId.HasValue && item.MontoAplicado > 0)
+            {
+                var df = await _context.DeduccionesFijas.FindAsync(item.OrigenDeduccionFijaId.Value);
+                if (df?.MontoTotalACobrar.HasValue == true)
+                {
+                    df.MontoCobradoAcumulado += item.MontoAplicado;
+                    // Auto-desactivar si ya se cobro el total
+                    if (df.MontoCobradoAcumulado >= df.MontoTotalACobrar.Value)
+                    {
+                        df.EstaActivo = false;
+                        df.UpdatedAt = DateTime.UtcNow;
+                    }
+                }
+            }
         }
 
         await _context.SaveChangesAsync();
@@ -318,31 +860,34 @@ public class PayrollProcessingService
         Empleado empleado,
         DateTime payrollPeriodStart,
         DateTime payrollPeriodEnd,
-        int payrollHeaderId)
+        int payrollHeaderId,
+        TipoPlanilla tipoPlanilla = TipoPlanilla.Regular)
     {
-        // Calcular planilla con deducciones adicionales y conceptos de asistencia
-        var (detail, prestamoIds, anticipoIds, horasExtra, ausencias, vacaciones) = await CalculateForEmployeeAsync(
+        var (detail, prestamoIds, anticipoIds, horasExtra, ausencias, vacaciones, deduccionesResult) = await CalculateForEmployeeAsync(
             companyId,
             empleado,
             payrollPeriodStart,
             payrollPeriodEnd,
-            payrollHeaderId
+            payrollHeaderId,
+            tipoPlanilla
         );
 
         // Guardar el detalle de planilla
         _context.PayrollDetails.Add(detail);
         await _context.SaveChangesAsync();
 
-        // Procesar préstamos y anticipos
-        await ProcessPrestamosAsync(prestamoIds, detail.Id, payrollHeaderId);
+        // Persistir auditoría de deducciones aplicadas (para reportes)
+        await CreateDeduccionesAplicadasAsync(detail, deduccionesResult);
+
+        // Procesar préstamos (usar monto realmente aplicado/prorrateado) y anticipos
+        await ProcessPrestamosAsync(prestamoIds, detail.Id, payrollHeaderId, deduccionesResult);
         await ProcessAnticiposAsync(anticipoIds, detail.Id, payrollHeaderId);
 
-        // Procesar conceptos de asistencia (marcar como pagados/procesados)
+        // Procesar conceptos de asistencia
         await _asistenciaService.MarcarHorasExtraPagadas(horasExtra, detail.Id);
         await _asistenciaService.MarcarAusenciasProcesadas(ausencias, detail.Id);
         await _asistenciaService.MarcarVacacionesPagadas(vacaciones, detail.Id);
 
-        // Guardar cambios de asistencia
         await _context.SaveChangesAsync();
 
         return detail;

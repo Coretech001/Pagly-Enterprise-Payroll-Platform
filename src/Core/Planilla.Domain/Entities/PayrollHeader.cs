@@ -10,15 +10,16 @@
 // ====================================================================
 
 using System.ComponentModel.DataAnnotations;
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Encabezado de planilla que representa un período de pago completo.
 /// Una planilla agrupa múltiples PayrollDetail (uno por empleado).
 /// </summary>
-public class PayrollHeader
+public class PayrollHeader : ITenantEntity
 {
     /// <summary>
     /// ID único de la planilla.
@@ -26,9 +27,9 @@ public class PayrollHeader
     public int Id { get; set; }
 
     /// <summary>
-    /// ID de la compañía dueña de la planilla.
+    /// ID del tenant al que pertenece esta planilla (multi-tenancy)
     /// </summary>
-    public int CompanyId { get; set; }
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Número de planilla único (ej: "PL-2025-01", "QUIN-2025-02").
@@ -52,6 +53,25 @@ public class PayrollHeader
     /// Fecha programada de pago a empleados.
     /// </summary>
     public DateTime PayDate { get; set; }
+
+    /// <summary>
+    /// Tipo de período de esta planilla.
+    /// CRÍTICO: Determina cómo se anualizan los salarios para ISR.
+    /// Se establece al crear la planilla y no debe cambiar después.
+    /// </summary>
+    public PayPeriodType PayPeriodType { get; set; } = PayPeriodType.Quincenal;
+
+    /// <summary>
+    /// Tipo de planilla: Regular (con deducciones legales) o SinDeducciones (solo bruto + deducciones adicionales).
+    /// </summary>
+    public TipoPlanilla TipoPlanilla { get; set; } = TipoPlanilla.Regular;
+
+    /// <summary>
+    /// Planilla aparte para pagarle a una o pocas personas que se quedaron
+    /// fuera de la planilla de su período. Solo incluye a las elegidas al
+    /// crearla; se calcula como si hubieran estado en la original.
+    /// </summary>
+    public bool EsExtraordinaria { get; set; }
 
     /// <summary>
     /// Estado actual de la planilla en el workflow.
@@ -81,6 +101,21 @@ public class PayrollHeader
     /// Total de costos patronales (CSS empleador + SE empleador + Riesgo).
     /// </summary>
     public decimal TotalEmployerCost { get; set; }
+
+    /// <summary>
+    /// Total de aporte CSS patronal acumulado de todos los empleados en esta planilla.
+    /// </summary>
+    public decimal TotalEmployerCss { get; set; }
+
+    /// <summary>
+    /// Total de aporte Seguro Educativo patronal acumulado de todos los empleados en esta planilla.
+    /// </summary>
+    public decimal TotalEmployerSe { get; set; }
+
+    /// <summary>
+    /// Total de aporte de Riesgo Profesional patronal acumulado de todos los empleados en esta planilla.
+    /// </summary>
+    public decimal TotalRiskInsurance { get; set; }
 
     // ====================================================================
     // Campos de workflow: Calculated
@@ -140,13 +175,7 @@ public class PayrollHeader
     // ====================================================================
     // Concurrencia optimista
     // ====================================================================
-
-    /// <summary>
-    /// Token de concurrencia optimista (auto-incrementado por EF Core).
-    /// Previene actualizaciones concurrentes conflictivas.
-    /// </summary>
-    [Timestamp]
-    public byte[] RowVersion { get; set; } = Array.Empty<byte>();
+    // PostgreSQL usa xmin (shadow property manejada por EF Core)
 
     // ====================================================================
     // Auditoría
@@ -170,4 +199,9 @@ public class PayrollHeader
     /// Detalles de la planilla (uno por empleado).
     /// </summary>
     public virtual ICollection<PayrollDetail> Details { get; set; } = new List<PayrollDetail>();
+
+    /// <summary>
+    /// Navigation property para Tenant
+    /// </summary>
+    public virtual Tenant? Tenant { get; set; }
 }

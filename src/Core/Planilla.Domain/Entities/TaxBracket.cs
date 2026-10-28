@@ -7,23 +7,24 @@
 // ====================================================================
 
 using System.ComponentModel.DataAnnotations;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa un tramo del Impuesto Sobre la Renta (ISR) con su rango de ingresos
 /// y tasa aplicable. El ISR en Panamá es progresivo por tramos.
 /// </summary>
-public class TaxBracket
+public class TaxBracket : ITenantEntity
 {
     [Key]
     public int Id { get; set; }
 
     /// <summary>
-    /// ID de la empresa/compañía a la que aplica este bracket
+    /// ID del tenant al que pertenece este bracket
     /// </summary>
     [Required]
-    public int CompanyId { get; set; }
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Año fiscal al que aplica este bracket (ej: 2025)
@@ -97,4 +98,7 @@ public class TaxBracket
     /// Fecha de última actualización del registro
     /// </summary>
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

@@ -1,16 +1,21 @@
-using Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Enums;
+using Vorluno.Planilla.Domain.Interfaces;
 
-namespace Planilla.Domain.Entities;
+namespace Vorluno.Planilla.Domain.Entities;
 
 /// <summary>
 /// Representa horas extra trabajadas por un empleado
 /// </summary>
-public class HoraExtra
+public class HoraExtra : ITenantEntity
 {
     public int Id { get; set; }
     public int EmpleadoId { get; set; }
     public Empleado Empleado { get; set; } = null!;
-    public int CompanyId { get; set; }
+
+    /// <summary>
+    /// ID del tenant al que pertenece esta hora extra
+    /// </summary>
+    public int TenantId { get; set; }
 
     /// <summary>
     /// Fecha en que se trabajaron las horas extra
@@ -38,9 +43,21 @@ public class HoraExtra
     public decimal CantidadHoras { get; set; }
 
     /// <summary>
-    /// Factor multiplicador según tipo (1.25, 1.50, 1.75)
+    /// Factor multiplicador según tipo (1.25, 1.50, 1.75, etc.)
     /// </summary>
     public decimal FactorMultiplicador { get; set; }
+
+    /// <summary>
+    /// Indica si estas horas extra exceden el límite legal (>3h/día o >9h/semana)
+    /// Según Código de Trabajo Art. 48
+    /// </summary>
+    public bool EsExceso { get; set; }
+
+    /// <summary>
+    /// Factor adicional por exceso (1.75x cuando EsExceso = true)
+    /// Se multiplica al FactorMultiplicador base
+    /// </summary>
+    public decimal? FactorExceso { get; set; }
 
     /// <summary>
     /// Monto calculado (se calcula en la planilla)
@@ -68,13 +85,43 @@ public class HoraExtra
     public DateTime? FechaAprobacion { get; set; }
 
     /// <summary>
+    /// Fecha en que se rechazó. El registro se conserva: rechazar no borra,
+    /// solo deja constancia de que no se paga.
+    /// </summary>
+    public DateTime? FechaRechazo { get; set; }
+
+    /// <summary>
+    /// Usuario que la rechazó
+    /// </summary>
+    public string? RechazadoPor { get; set; }
+
+    /// <summary>
+    /// Por qué no se paga, en palabras de quien decidió
+    /// </summary>
+    public string? MotivoRechazo { get; set; }
+
+    /// <summary>
+    /// Ni aprobada ni rechazada: espera la decisión
+    /// </summary>
+    public bool EstaPendiente => !EstaAprobada && FechaRechazo == null;
+
+    /// <summary>
     /// ID del detalle de planilla cuando se paga
     /// </summary>
     public int? PlanillaDetailId { get; set; }
 
     public string? Observaciones { get; set; }
 
+    /// <summary>
+    /// De dónde salió: null si la registró una persona, "Reloj" si la propuso
+    /// Pagly a partir de las marcaciones del reloj de asistencia.
+    /// </summary>
+    public string? Origen { get; set; }
+
     // Auditoría
     public DateTime CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+
+    // Navigation property
+    public virtual Tenant? Tenant { get; set; }
 }

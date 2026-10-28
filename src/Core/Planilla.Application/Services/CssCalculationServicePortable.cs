@@ -2,7 +2,7 @@
 // Planilla - CssCalculationServicePortable
 // Source: Core360 Stage 4, Sección 3
 // Portado: 2025-12-26
-// Descripción: Servicio de cálculo CSS (Caja de Seguro Social) según Ley 462 de Panamá
+// Descripción: Servicio de cálculo CSS (Caja de Seguro Social) según Reforma CSS de Panamá
 // Cambios vs Core360:
 //   - Eliminado ILogger (opcional)
 //   - Reemplazado repositorio por IPayrollConfigProvider
@@ -10,15 +10,15 @@
 //   - Lanza InvalidOperationException si falta configuración (NO fallback silencioso)
 // ====================================================================
 
-using Planilla.Application.DTOs;
-using Planilla.Application.Helpers;
-using Planilla.Application.Interfaces;
-using Planilla.Application.Results;
+using Vorluno.Planilla.Application.DTOs;
+using Vorluno.Planilla.Application.Helpers;
+using Vorluno.Planilla.Application.Interfaces;
+using Vorluno.Planilla.Application.Results;
 
-namespace Planilla.Application.Services;
+namespace Vorluno.Planilla.Application.Services;
 
 /// <summary>
-/// Servicio de cálculo de CSS (Caja de Seguro Social) según Ley 462 de Panamá.
+/// Servicio de cálculo de CSS (Caja de Seguro Social) según Reforma CSS de Panamá.
 /// Implementa topes variables de cotización según años cotizados y salario promedio.
 /// </summary>
 public class CssCalculationServicePortable
@@ -84,12 +84,12 @@ public class CssCalculationServicePortable
     public async Task<CssCalculationResult> CalculateEmployeeCssAsync(
         int companyId,
         decimal grossPay,
+        string payFrequency,
         int yearsCotized,
         decimal averageSalaryLast10Years,
         bool isSubjectToCss,
         DateTime calculationDate)
     {
-        // Si no está sujeto a CSS, retorna ceros
         if (!isSubjectToCss)
         {
             return new CssCalculationResult(
@@ -101,11 +101,9 @@ public class CssCalculationServicePortable
             );
         }
 
-        // Determinar tope aplicable
         var (cap, tipoTope) = await DetermineCssCapAsync(
             companyId, yearsCotized, averageSalaryLast10Years, calculationDate);
 
-        // Obtener configuración de tasas
         var config = await _configProvider.GetTaxConfigAsync(companyId, calculationDate);
         if (config == null)
         {
@@ -113,14 +111,22 @@ public class CssCalculationServicePortable
                 $"No se encontró configuración de CSS activa para companyId={companyId} en fecha {calculationDate:yyyy-MM-dd}");
         }
 
-        // Calcular CSS empleado
-        var contributionBase = Math.Min(grossPay, cap);
-        var rate = config.CssEmployeeRate; // 9.75% (fija según Ley 462)
+        // Prorratear tope mensual según frecuencia de pago
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
+        var periodCap = RoundingPolicy.Round(cap * 12m / periodsPerYear, 2);
+
+        // NO existe tope de salario cotizable. Ley 51 de 2005 Art. 96.1 (Texto Unico con
+        // reformas de la Ley 462 de 2025, Gaceta Oficial 30284-B): la cuota del empleado es
+        // "el equivalente a 9.75 % de sus sueldos", sin techo alguno.
+        // Los montos B/.1,500 / 2,000 / 2,500 son el MONTO MAXIMO DE LA PENSION (Art. 193),
+        // no una base maxima de cotizacion. periodCap se conserva solo como dato informativo.
+        var contributionBase = grossPay;
+        var rate = config.CssEmployeeRate;
         var amount = RoundingPolicy.CalculatePercentage(contributionBase, rate);
 
         return new CssCalculationResult(
             ContributionBase: contributionBase,
-            MaxContributionBase: cap,
+            MaxContributionBase: periodCap,
             TipoTope: tipoTope,
             Rate: rate,
             Amount: amount
@@ -141,12 +147,12 @@ public class CssCalculationServicePortable
     public async Task<CssCalculationResult> CalculateEmployerCssAsync(
         int companyId,
         decimal grossPay,
+        string payFrequency,
         int yearsCotized,
         decimal averageSalaryLast10Years,
         bool isSubjectToCss,
         DateTime calculationDate)
     {
-        // Si no está sujeto a CSS, retorna ceros
         if (!isSubjectToCss)
         {
             return new CssCalculationResult(
@@ -158,11 +164,9 @@ public class CssCalculationServicePortable
             );
         }
 
-        // Determinar tope aplicable
         var (cap, tipoTope) = await DetermineCssCapAsync(
             companyId, yearsCotized, averageSalaryLast10Years, calculationDate);
 
-        // Obtener configuración de tasas
         var config = await _configProvider.GetTaxConfigAsync(companyId, calculationDate);
         if (config == null)
         {
@@ -170,19 +174,22 @@ public class CssCalculationServicePortable
                 $"No se encontró configuración de CSS activa para companyId={companyId} en fecha {calculationDate:yyyy-MM-dd}");
         }
 
-        // Calcular CSS empleador
-        var contributionBase = Math.Min(grossPay, cap);
+        // Prorratear tope mensual según frecuencia de pago
+        var periodsPerYear = PayrollConstants.GetPeriodsPerYear(payFrequency);
+        var periodCap = RoundingPolicy.Round(cap * 12m / periodsPerYear, 2);
 
-        // Tasa escalonada según Ley 462:
-        // 2020-2024: 13.25%
-        // 2025-2027: 14.25%
-        // 2028+: 15.25%
+        // NO existe tope de salario cotizable. Ley 51 de 2005 Art. 96.1 (Texto Unico con
+        // reformas de la Ley 462 de 2025, Gaceta Oficial 30284-B): la cuota del empleado es
+        // "el equivalente a 9.75 % de sus sueldos", sin techo alguno.
+        // Los montos B/.1,500 / 2,000 / 2,500 son el MONTO MAXIMO DE LA PENSION (Art. 193),
+        // no una base maxima de cotizacion. periodCap se conserva solo como dato informativo.
+        var contributionBase = grossPay;
         var rate = config.CssEmployerBaseRate;
         var amount = RoundingPolicy.CalculatePercentage(contributionBase, rate);
 
         return new CssCalculationResult(
             ContributionBase: contributionBase,
-            MaxContributionBase: cap,
+            MaxContributionBase: periodCap,
             TipoTope: tipoTope,
             Rate: rate,
             Amount: amount
@@ -204,48 +211,30 @@ public class CssCalculationServicePortable
     public async Task<(decimal Amount, decimal Rate)> CalculateRiskContributionAsync(
         int companyId,
         decimal grossPay,
-        int yearsCotized,
-        decimal averageSalaryLast10Years,
         decimal cssRiskPercentage,
         bool isSubjectToCss,
         DateTime calculationDate)
     {
-        // Si no está sujeto a CSS, no hay riesgo profesional
         if (!isSubjectToCss)
         {
             return (0, 0);
         }
 
-        // Determinar tope aplicable
-        var (cap, _) = await DetermineCssCapAsync(
-            companyId, yearsCotized, averageSalaryLast10Years, calculationDate);
-
-        // Obtener configuración de tasas
-        var config = await _configProvider.GetTaxConfigAsync(companyId, calculationDate);
-        if (config == null)
+        // DEV-92: tasa negativa indica dato corrupto en BD — lanza excepción explícita.
+        if (cssRiskPercentage < 0)
         {
             throw new InvalidOperationException(
-                $"No se encontró configuración de CSS activa para companyId={companyId} en fecha {calculationDate:yyyy-MM-dd}");
+                $"CssRiskPercentage no puede ser negativo: {cssRiskPercentage}. " +
+                "Verifique la configuración del empleado.");
         }
 
-        var contributionBase = Math.Min(grossPay, cap);
+        // DEV-86: Riesgo profesional NO tiene tope de cotización pensional (Art. 178 Ley 462).
+        // Se calcula sobre el salario bruto completo — no se necesita DetermineCssCapAsync.
+        // DEV-91: payFrequency, yearsCotized, averageSalaryLast10Years eliminados (no usados).
+        // Usar la tasa del empleado directamente (Acuerdo N°2 de 1995: 0.56/0.98/2.10/3.64/5.67%)
+        decimal riskRate = cssRiskPercentage;
 
-        // Determinar tasa de riesgo según el porcentaje del empleado/puesto
-        decimal riskRate;
-        if (cssRiskPercentage <= 0.56m)
-        {
-            riskRate = config.CssRiskRateLow; // 0.56% - Riesgo bajo
-        }
-        else if (cssRiskPercentage <= 2.50m)
-        {
-            riskRate = config.CssRiskRateMedium; // 2.50% - Riesgo medio
-        }
-        else
-        {
-            riskRate = config.CssRiskRateHigh; // 5.39% - Riesgo alto
-        }
-
-        var amount = RoundingPolicy.CalculatePercentage(contributionBase, riskRate);
+        var amount = RoundingPolicy.CalculatePercentage(grossPay, riskRate);
 
         return (amount, riskRate);
     }
@@ -265,23 +254,21 @@ public class CssCalculationServicePortable
     public async Task<CssFullCalculationResult> CalculateFullCssAsync(
         int companyId,
         decimal grossPay,
+        string payFrequency,
         int yearsCotized,
         decimal averageSalaryLast10Years,
         decimal cssRiskPercentage,
         bool isSubjectToCss,
         DateTime calculationDate)
     {
-        // Calcular CSS empleado
         var employeeCss = await CalculateEmployeeCssAsync(
-            companyId, grossPay, yearsCotized, averageSalaryLast10Years, isSubjectToCss, calculationDate);
+            companyId, grossPay, payFrequency, yearsCotized, averageSalaryLast10Years, isSubjectToCss, calculationDate);
 
-        // Calcular CSS empleador
         var employerCss = await CalculateEmployerCssAsync(
-            companyId, grossPay, yearsCotized, averageSalaryLast10Years, isSubjectToCss, calculationDate);
+            companyId, grossPay, payFrequency, yearsCotized, averageSalaryLast10Years, isSubjectToCss, calculationDate);
 
-        // Calcular riesgo profesional
         var (riskAmount, riskRate) = await CalculateRiskContributionAsync(
-            companyId, grossPay, yearsCotized, averageSalaryLast10Years, cssRiskPercentage, isSubjectToCss, calculationDate);
+            companyId, grossPay, cssRiskPercentage, isSubjectToCss, calculationDate);
 
         return new CssFullCalculationResult(
             EmployeeCss: employeeCss,
