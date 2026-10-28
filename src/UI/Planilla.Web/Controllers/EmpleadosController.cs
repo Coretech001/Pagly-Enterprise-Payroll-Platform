@@ -148,7 +148,8 @@ namespace Vorluno.Planilla.Web.Controllers
                     e.Empleado.Dependents,
                     e.Empleado.CssRiskPercentage,
                     (int)e.Empleado.PayPeriodType,
-                    e.Empleado.TipoContrato
+                    e.Empleado.TipoContrato,
+                    e.Empleado.GastoRepresentacionMensual
                 );
             }).ToList();
 
@@ -236,7 +237,8 @@ namespace Vorluno.Planilla.Web.Controllers
                 result.Empleado.Dependents,
                 result.Empleado.CssRiskPercentage,
                 (int)result.Empleado.PayPeriodType,
-                result.Empleado.TipoContrato
+                result.Empleado.TipoContrato,
+                result.Empleado.GastoRepresentacionMensual
             );
 
             return Ok(empleadoDto);
@@ -258,6 +260,16 @@ namespace Vorluno.Planilla.Web.Controllers
             // Validar número de identificación único dentro del tenant
             // DEV-34: Filtrar explícitamente por TenantId para evitar fuga cross-tenant.
             // Sin este filtro, revelaría si la cédula existe en otro tenant.
+            // El gasto de representación no puede exceder el salario del trabajador:
+            // por encima de eso deja de ser deducible para la empresa.
+            if (empleadoDto.GastoRepresentacionMensual > empleadoDto.SalarioBase)
+            {
+                return BadRequest(new
+                {
+                    message = "El gasto de representación no puede ser mayor que el salario del empleado."
+                });
+            }
+
             var numeroIdentificacion = (empleadoDto.NumeroIdentificacion ?? "").Trim();
             var yaExiste = await _context.Empleados
                 .AnyAsync(e => e.TenantId == tenantId && e.NumeroIdentificacion == numeroIdentificacion && !e.IsDeleted);
@@ -369,7 +381,8 @@ namespace Vorluno.Planilla.Web.Controllers
                 empleado.Dependents,
                 empleado.CssRiskPercentage,
                 (int)empleado.PayPeriodType,
-                empleado.TipoContrato
+                empleado.TipoContrato,
+                empleado.GastoRepresentacionMensual
             );
 
             // ✅ AUDIT LOG: Registrar creación de empleado
@@ -419,6 +432,16 @@ namespace Vorluno.Planilla.Web.Controllers
                 return Forbid(); // 403 Forbidden - no puede editar otros empleados
             }
 
+            // El gasto de representación no puede exceder el salario del trabajador:
+            // por encima de eso deja de ser deducible para la empresa.
+            if (empleadoDto.GastoRepresentacionMensual > empleadoDto.SalarioBase)
+            {
+                return BadRequest(new
+                {
+                    message = "El gasto de representación no puede ser mayor que el salario del empleado."
+                });
+            }
+
             var empleado = await _context.Empleados
                 .FirstOrDefaultAsync(e => e.Id == id && e.TenantId == tenantId);
 
@@ -431,12 +454,42 @@ namespace Vorluno.Planilla.Web.Controllers
             var emailOriginal = empleado.Email;
 
             var salarioOriginal = empleado.SalarioBase;
+            var valoresOriginales = _context.Entry(empleado).CurrentValues.Clone();
 
             // Mantiene NumeroIdentificacion y FechaContratacion originales - solo actualiza campos permitidos
             _mapper.Map(empleadoDto, empleado);
 
+            // Autoservicio (sin permiso de gestionar empleados): solo sus datos
+            // básicos. Su salario, cargo, estado y datos de planilla no los puede
+            // cambiar quien los cobra.
+            var roles = HttpContext.RequestServices.GetRequiredService<ICustomTenantRoleService>();
+            var puedeGestionar = await roles.HasPermissionAsync(SystemPermission.EmployeesUpdate);
+            if (!(puedeGestionar.Success && puedeGestionar.Value))
+            {
+                var permitidos = new HashSet<string> { nameof(Empleado.Nombre), nameof(Empleado.Apellido), nameof(Empleado.Email) };
+                foreach (var propiedad in _context.Entry(empleado).Properties)
+                    if (!permitidos.Contains(propiedad.Metadata.Name))
+                        propiedad.CurrentValue = valoresOriginales[propiedad.Metadata];
+            }
+
             if (!string.IsNullOrEmpty(empleado.UserId))
                 empleado.Email = emailOriginal;
+
+            // Si la empresa exige la confirmación de otra persona, el salario nuevo
+            // no se aplica: se guarda lo demás y el cambio queda pendiente.
+            CambioPendiente? salarioPendiente = null;
+            if (empleado.SalarioBase != salarioOriginal)
+            {
+                var cambios = HttpContext.RequestServices.GetRequiredService<CambiosSensiblesService>();
+                if (await cambios.ActivoAsync())
+                {
+                    var nuevo = empleado.SalarioBase;
+                    empleado.SalarioBase = salarioOriginal;
+                    var (pendiente, error) = await cambios.PedirSalarioAsync(empleado, salarioOriginal, nuevo, this.GetCurrentUserId());
+                    if (error != null) return BadRequest(new { message = error });
+                    salarioPendiente = pendiente;
+                }
+            }
 
             // B5: si cambió el salario, registrar el nuevo valor en el historial
             if (empleado.SalarioBase != salarioOriginal)
@@ -474,6 +527,12 @@ namespace Vorluno.Planilla.Web.Controllers
                 // No bloqueamos la operación si falla el audit log
             }
 
+            if (salarioPendiente != null)
+                return Accepted(new
+                {
+                    cambioPendiente = true,
+                    message = "Se guardaron los cambios; el salario nuevo queda pendiente de que otra persona lo confirme.",
+                });
             return NoContent(); // Retorna un 204 No Content para indicar éxito
         }
 
@@ -517,6 +576,19 @@ namespace Vorluno.Planilla.Web.Controllers
 
             if (empleado.IsDeleted)
                 return BadRequest(new { error = "El empleado ya está eliminado" });
+
+            // Si la empresa exige la confirmación de otra persona, la baja queda pendiente.
+            var cambiosSensibles = HttpContext.RequestServices.GetRequiredService<CambiosSensiblesService>();
+            if (await cambiosSensibles.ActivoAsync())
+            {
+                var (_, errorBaja) = await cambiosSensibles.PedirBajaAsync(empleado, currentUserId);
+                if (errorBaja != null) return BadRequest(new { message = errorBaja });
+                return Accepted(new
+                {
+                    cambioPendiente = true,
+                    message = "La baja queda pendiente de que otra persona la confirme.",
+                });
+            }
 
             empleado.IsDeleted = true;
             empleado.DeletedAt = DateTime.UtcNow;
@@ -689,6 +761,11 @@ namespace Vorluno.Planilla.Web.Controllers
                 return NotFound(new { error = "Empleado no encontrado" });
             }
 
+            // Mientras haya un cambio de salario o una baja pendiente, el usuario
+            // de la ficha no se cambia (no sirve para confirmar lo propio).
+            if (await HttpContext.RequestServices.GetRequiredService<CambiosSensiblesService>().TienePendientesAsync(empleado.Id))
+                return BadRequest(new { error = "Esta persona tiene un cambio esperando confirmación; resuélvelo antes de cambiar su usuario." });
+
             // Verificar que el usuario pertenece al tenant
             var tenantUser = await _context.TenantUsers
                 .Include(tu => tu.User)
@@ -758,6 +835,11 @@ namespace Vorluno.Planilla.Web.Controllers
             {
                 return NotFound(new { error = "Empleado no encontrado" });
             }
+
+            // Mientras haya un cambio de salario o una baja pendiente, el usuario
+            // de la ficha no se cambia (no sirve para confirmar lo propio).
+            if (await HttpContext.RequestServices.GetRequiredService<CambiosSensiblesService>().TienePendientesAsync(empleado.Id))
+                return BadRequest(new { error = "Esta persona tiene un cambio esperando confirmación; resuélvelo antes de cambiar su usuario." });
 
             if (empleado.UserId == null)
             {

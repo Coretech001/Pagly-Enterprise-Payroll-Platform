@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/pagly/pagly/main/BANNER-GITHUB.png" alt="Pagly" width="100%">
-
 # 💼 Pagly — Enterprise Payroll Platform
 
 ### Multi-tenant SaaS for Complete Payroll Management in Panama

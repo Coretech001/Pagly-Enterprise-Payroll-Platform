@@ -23,17 +23,20 @@ public class LiquidacionesController : ControllerBase
     private readonly ITenantContext _tenantContext;
     private readonly IAuditLogService _auditLogService;
     private readonly LiquidacionCalculationService _calculationService;
+    private readonly IBasesLiquidacionProvider _basesProvider;
 
     public LiquidacionesController(
         ApplicationDbContext context,
         ITenantContext tenantContext,
         IAuditLogService auditLogService,
-        LiquidacionCalculationService calculationService)
+        LiquidacionCalculationService calculationService,
+        IBasesLiquidacionProvider basesProvider)
     {
         _context = context;
         _tenantContext = tenantContext;
         _auditLogService = auditLogService;
         _calculationService = calculationService;
+        _basesProvider = basesProvider;
     }
 
     /// <summary>
@@ -43,8 +46,12 @@ public class LiquidacionesController : ControllerBase
     [RequirePermission(SystemPermission.PayrollView)]
     public async Task<IActionResult> GetAll(
         [FromQuery] int? empleadoId,
-        [FromQuery] EstadoLiquidacion? estado)
+        [FromQuery] EstadoLiquidacion? estado,
+        [FromQuery] int? anio = null,
+        [FromQuery] int? mes = null)
     {
+        if (mes is < 1 or > 12) return BadRequest(new { message = "El mes debe estar entre 1 y 12." });
+
         var tenantId = _tenantContext.TenantId;
         var query = _context.Liquidaciones
             .Where(l => l.TenantId == tenantId)
@@ -58,9 +65,17 @@ public class LiquidacionesController : ControllerBase
         if (estado.HasValue)
             query = query.Where(l => l.Estado == estado.Value);
 
-        var liquidaciones = await query
-            .OrderByDescending(l => l.FechaLiquidacion)
-            .ToListAsync();
+        // Vista por mes: la liquidación pertenece al mes en que termina la
+        // relación laboral, que es el que declara el SIPE.
+        if (anio.HasValue)
+        {
+            query = query.Where(l => l.FechaTerminacion.Year == anio.Value);
+            if (mes.HasValue) query = query.Where(l => l.FechaTerminacion.Month == mes.Value);
+        }
+
+        var liquidaciones = anio.HasValue
+            ? await query.OrderBy(l => l.FechaTerminacion).ThenBy(l => l.Id).ToListAsync()
+            : await query.OrderByDescending(l => l.FechaLiquidacion).ToListAsync();
 
         var dtos = liquidaciones.Select(MapToDto);
         return Ok(dtos);
@@ -84,6 +99,71 @@ public class LiquidacionesController : ControllerBase
             return NotFound();
 
         return Ok(MapToDto(liquidacion));
+    }
+
+    /// <summary>
+    /// Calcula una liquidación SIN guardarla, y devuelve además de dónde sale
+    /// cada partida: los 60 meses devengados, el promedio de 6 meses, el
+    /// último salario y los dos cortes (última vacación, última partida de
+    /// décimo). Es lo que la pantalla enseña antes de crear.
+    /// POST /api/liquidaciones/previsualizar
+    /// </summary>
+    [HttpPost("previsualizar")]
+    [RequirePermission(SystemPermission.PayrollCalculate)]
+    public async Task<IActionResult> Previsualizar(CreateLiquidacionRequest request)
+    {
+        var tenantId = _tenantContext.TenantId;
+
+        var empleado = await _context.Empleados
+            .Where(e => e.Id == request.EmpleadoId && e.TenantId == tenantId)
+            .Include(e => e.HistorialSalarial)
+            .FirstOrDefaultAsync();
+
+        if (empleado == null)
+            return BadRequest(new { message = "Empleado no encontrado" });
+        if (request.FechaTerminacion < empleado.FechaContratacion)
+            return BadRequest(new { message = "La fecha de terminación no puede ser anterior a la fecha de contratación" });
+
+        var bases = await _basesProvider.ObtenerAsync(empleado.Id, empleado.FechaContratacion, request.FechaTerminacion);
+        var r = _calculationService.Calcular(empleado, request, ultimaFechaVacaciones: null, bases: bases);
+        var fuero = await FueroMaternidadHastaAsync(empleado.Id, request.FechaTerminacion);
+
+        return Ok(new
+        {
+            empleado = new { empleado.Id, empleado.Nombre, empleado.Apellido, empleado.NumeroIdentificacion, empleado.FechaContratacion },
+            calculo = r,
+            // Fecha hasta la que tiene fuero de maternidad, si lo tiene en la fecha de terminación.
+            fueroMaternidadHasta = fuero,
+            // Sin historial se liquida con el salario base: la pantalla lo avisa.
+            usaDevengadoReal = bases is not null,
+            bases = bases is null ? null : new
+            {
+                devengado60Meses = bases.Devengado60Meses,
+                mesesConDatos = bases.MesesConDatos,
+                semanas = LiquidacionCalculator.SemanasDeMeses(Math.Clamp(bases.MesesConDatos, 1, 60)),
+                promedio6Meses = bases.Meses6ConDatos > 0 ? bases.Devengado6Meses / bases.Meses6ConDatos : 0m,
+                bases.UltimoMesDevengado,
+                bases.DevengadoDesdeUltimaVacacion,
+                bases.VacacionesDesde,
+                bases.DevengadoDesdeUltimaPartidaDecimo,
+                bases.DecimoDesde,
+                meses = bases.Meses60,
+            },
+        });
+    }
+
+    /// <summary>
+    /// Hasta cuándo tiene fuero de maternidad en esa fecha (desde el inicio de
+    /// la licencia hasta un año después del regreso), o null si no lo tiene.
+    /// </summary>
+    private async Task<DateTime?> FueroMaternidadHastaAsync(int empleadoId, DateTime fecha)
+    {
+        var tenantId = _tenantContext.TenantId;
+        var licencias = await _context.LicenciasMaternidad.AsNoTracking()
+            .Where(l => l.TenantId == tenantId && l.EmpleadoId == empleadoId && !l.Anulada && l.FechaInicio <= fecha)
+            .ToListAsync();
+        var vigente = licencias.Where(l => l.FueroHasta >= fecha.Date).OrderByDescending(l => l.FueroHasta).FirstOrDefault();
+        return vigente?.FueroHasta;
     }
 
     /// <summary>
@@ -111,14 +191,29 @@ public class LiquidacionesController : ControllerBase
         var liquidacionExistente = await _context.Liquidaciones
             .Where(l => l.EmpleadoId == request.EmpleadoId
                 && l.TenantId == tenantId
-                && l.Estado != EstadoLiquidacion.Pagada)
+                && l.Estado != EstadoLiquidacion.Pagada
+                && l.Estado != EstadoLiquidacion.Anulada)
             .FirstOrDefaultAsync();
 
         if (liquidacionExistente != null)
             return BadRequest(new { message = "Ya existe una liquidación pendiente para este empleado. Debe pagarla o eliminarla antes de crear otra." });
 
-        // Calcular liquidación
-        var resultado = _calculationService.Calcular(empleado, request);
+        // Fuero de maternidad: un despido necesita autorización judicial previa.
+        var fueroHasta = await FueroMaternidadHastaAsync(empleado.Id, request.FechaTerminacion);
+        var esDespido = request.TipoTerminacion is TipoTerminacion.Despido or TipoTerminacion.DespidoJustificado;
+        if (fueroHasta.HasValue && esDespido && !request.ConfirmaFueroMaternidad)
+            return BadRequest(new
+            {
+                message = $"Tiene fuero de maternidad hasta el {fueroHasta.Value:dd/MM/yyyy}: despedirla requiere autorización judicial previa (Código de Trabajo, Art. 106). Si ya la tienen, confírmalo para continuar.",
+                fueroMaternidadHasta = fueroHasta,
+            });
+
+        // Calcular liquidación con el devengado real del empleado (60 meses,
+        // última vacación y última partida de décimo). Sin historial, el
+        // servicio cae al método basado en el salario base.
+        var bases = await _basesProvider.ObtenerAsync(
+            empleado.Id, empleado.FechaContratacion, request.FechaTerminacion);
+        var resultado = _calculationService.Calcular(empleado, request, ultimaFechaVacaciones: null, bases: bases);
 
         // Generar número correlativo
         var anio = DateTime.UtcNow.Year;
@@ -312,6 +407,52 @@ public class LiquidacionesController : ControllerBase
     }
 
     /// <summary>
+    /// Anula una liquidación calculada, aprobada o pagada. No se borra: deja
+    /// de contar para el mes y para el SIPE, pero se conserva para auditoría.
+    /// POST /api/liquidaciones/{id}/anular
+    /// </summary>
+    [HttpPost("{id}/anular")]
+    [RequirePermission(SystemPermission.PayrollApprove)]
+    public async Task<IActionResult> Anular(int id, [FromBody] AnularLiquidacionRequest? request = null)
+    {
+        var tenantId = _tenantContext.TenantId;
+        var liquidacion = await _context.Liquidaciones
+            .FirstOrDefaultAsync(l => l.Id == id && l.TenantId == tenantId);
+
+        if (liquidacion == null)
+            return NotFound();
+        if (liquidacion.Estado == EstadoLiquidacion.Anulada)
+            return BadRequest(new { message = "Esta liquidación ya está anulada." });
+        if (liquidacion.Estado == EstadoLiquidacion.Borrador)
+            return BadRequest(new { message = "Un borrador se elimina, no se anula." });
+
+        var estadoAnterior = liquidacion.Estado;
+        liquidacion.Estado = EstadoLiquidacion.Anulada;
+        liquidacion.UpdatedAt = DateTime.UtcNow;
+        var motivo = request?.Motivo?.Trim();
+        liquidacion.Observaciones = string.IsNullOrWhiteSpace(motivo)
+            ? liquidacion.Observaciones
+            : $"{liquidacion.Observaciones}\nAnulada: {motivo}".Trim();
+
+        await _context.SaveChangesAsync();
+
+        try
+        {
+            await _auditLogService.LogAsync("LiquidacionAnulada", "Liquidacion", id.ToString(),
+                new Dictionary<string, string>
+                {
+                    ["Numero"] = liquidacion.Numero,
+                    ["EstadoAnterior"] = estadoAnterior.ToString(),
+                    ["Motivo"] = motivo ?? "sin motivo",
+                    ["TotalNeto"] = liquidacion.TotalNeto.ToString("N2"),
+                });
+        }
+        catch (Exception) { }
+
+        return Ok(new { message = $"La liquidación {liquidacion.Numero} quedó anulada" });
+    }
+
+    /// <summary>
     /// Exportar PDF de liquidación (stub — retorna NotImplemented por ahora).
     /// </summary>
     [HttpGet("{id}/pdf")]
@@ -373,3 +514,6 @@ public class LiquidacionesController : ControllerBase
         );
     }
 }
+
+/// <summary>Motivo opcional al anular una liquidación.</summary>
+public record AnularLiquidacionRequest(string? Motivo);

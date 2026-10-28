@@ -55,6 +55,11 @@ namespace Vorluno.Planilla.Web.Extensions
             services.AddScoped<PayrollStateMachine>();
             services.AddScoped<PayrollCalculationOrchestratorPortable>();
             services.AddScoped<Vorluno.Planilla.Application.Interfaces.IDeduccionPrioridadEngine, DeduccionPrioridadEngine>();
+            services.AddScoped<Vorluno.Planilla.Application.Interfaces.IAcumuladoFiscalService, Vorluno.Planilla.Infrastructure.Services.AcumuladoFiscalService>();
+            services.AddScoped<Vorluno.Planilla.Application.Interfaces.IDevengadoMensualService, Vorluno.Planilla.Infrastructure.Services.DevengadoMensualService>();
+            services.AddScoped<Vorluno.Planilla.Application.Interfaces.IHorasPlanillaService, Vorluno.Planilla.Infrastructure.Services.HorasPlanillaService>();
+            services.AddScoped<Vorluno.Planilla.Application.Interfaces.IBasesLiquidacionProvider, Vorluno.Planilla.Infrastructure.Services.BasesLiquidacionProvider>();
+            services.AddScoped<Vorluno.Planilla.Infrastructure.Services.IImportacionEmpleadosService, Vorluno.Planilla.Infrastructure.Services.ImportacionEmpleadosService>();
             services.AddScoped<PayrollProcessingService>();
 
             // Phase E: Multi-tenancy y auditor�a
@@ -66,6 +71,14 @@ namespace Vorluno.Planilla.Web.Extensions
             // Phase G: Reportes y exportaci�n
             services.AddScoped<ReportesService>();
             services.AddScoped<ExportacionService>();
+
+            // Revisiones entre el equipo y avisos de la campana
+            services.AddScoped<Vorluno.Planilla.Infrastructure.Services.RevisionesService>();
+
+            // Horas extra (registro compartido) y reloj de asistencia
+            services.AddScoped<Vorluno.Planilla.Infrastructure.Services.RegistroHorasExtraService>();
+            services.AddScoped<Vorluno.Planilla.Infrastructure.Services.RelojAsistenciaService>();
+            services.AddScoped<Vorluno.Planilla.Infrastructure.Services.CambiosSensiblesService>();
 
             // TODO: React SPA will communicate via REST API endpoints, no server-side interop needed
         }

@@ -38,10 +38,15 @@ import DeduccionesPage from './pages/DeduccionesPage.jsx';
 import AcreedoresPage from './pages/AcreedoresPage.jsx';
 import AnticiposPage from './pages/AnticiposPage.jsx';
 import HorasExtraPage from './pages/HorasExtraPage.jsx';
+import AvisosPage from './pages/AvisosPage.jsx';
+import LicenciasMaternidadPage from './pages/LicenciasMaternidadPage.jsx';
+import RelojAsistenciaPage from './pages/RelojAsistenciaPage.jsx';
 import AusenciasPage from './pages/AusenciasPage.jsx';
 import VacacionesPage from './pages/VacacionesPage.jsx';
 import PlanillasPage from './pages/PlanillasPage.jsx';
 import DecimoPage from './pages/DecimoPage.jsx';
+import FichaIsrPage from './pages/FichaIsrPage.jsx';
+import ImportarEmpleadosPage from './pages/ImportarEmpleadosPage.jsx';
 import ConfiguracionPage from './pages/ConfiguracionPage.jsx';
 import SalarioMinimoPage from './pages/SalarioMinimoPage.jsx';
 import ReportesPage from './pages/ReportesPage.jsx';
@@ -380,6 +385,39 @@ function App() {
         />
 
         <Route
+          path="/reloj"
+          element={
+            <ProtectedRoute>
+              <AuthLayout>
+                <RelojAsistenciaPage />
+              </AuthLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/maternidad"
+          element={
+            <ProtectedRoute>
+              <AuthLayout>
+                <LicenciasMaternidadPage />
+              </AuthLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/avisos"
+          element={
+            <ProtectedRoute>
+              <AuthLayout>
+                <AvisosPage />
+              </AuthLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/horas-extra"
           element={
             <ProtectedRoute>
@@ -429,6 +467,28 @@ function App() {
             <ProtectedRoute>
               <AuthLayout>
                 <DecimoPage />
+              </AuthLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/empleados/importar"
+          element={
+            <ProtectedRoute>
+              <AuthLayout>
+                <ImportarEmpleadosPage />
+              </AuthLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/ficha-isr"
+          element={
+            <ProtectedRoute>
+              <AuthLayout>
+                <FichaIsrPage />
               </AuthLayout>
             </ProtectedRoute>
           }

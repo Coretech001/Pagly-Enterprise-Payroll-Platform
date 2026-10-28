@@ -38,6 +38,20 @@ public class Empleado : ITenantEntity
     [Range(0, double.MaxValue, ErrorMessage = "El salario base no puede ser negativo.")]
     public decimal SalarioBase { get; set; }
 
+    /// <summary>
+    /// Gasto de representación MENSUAL, igual que el salario base.
+    ///
+    /// Es remuneración adicional al sueldo con tratamiento fiscal propio: para la
+    /// Caja de Seguro Social es salario al 100% (Ley 51 de 2005, Art. 91 num. 6),
+    /// pero el impuesto sobre la renta lo grava con tarifa aparte (10% hasta
+    /// B/.25,000 anuales y 15% sobre el excedente), sin proyección ni deducciones.
+    ///
+    /// Por ley no puede exceder el salario del trabajador.
+    /// </summary>
+    [Column(TypeName = "decimal(18, 2)")]
+    [Range(0, double.MaxValue, ErrorMessage = "El gasto de representación no puede ser negativo.")]
+    public decimal GastoRepresentacionMensual { get; set; }
+
     public DateTime FechaContratacion { get; set; }
 
     /// <summary>
@@ -190,6 +204,17 @@ public class Empleado : ITenantEntity
     List<HistorialSalarial>();
 
     // Navigation properties para Departamento y Posicion
+    /// <summary>
+    /// Número de la persona en el reloj de asistencia (no es la cédula). Se
+    /// asocia una sola vez y desde entonces sus marcaciones llegan a su ficha.
+    /// </summary>
+    [StringLength(30)]
+    public string? CodigoReloj { get; set; }
+
+    /// <summary>Horario contra el que se comparan sus marcaciones (si no, el predeterminado).</summary>
+    public int? HorarioLaboralId { get; set; }
+    public virtual HorarioLaboral? HorarioLaboral { get; set; }
+
     public virtual Departamento? Departamento { get; set; }
     public virtual Posicion? Posicion { get; set; }
 
@@ -277,6 +302,17 @@ public class Empleado : ITenantEntity
         return periodsPerYear > 0
             ? Math.Round(SalarioBase * 12m / periodsPerYear, 2)
             : SalarioBase;
+    }
+
+    /// <summary>Gasto de representación del período, prorrateado igual que el salario.</summary>
+    public decimal GetGastoRepresentacionPeriodo()
+    {
+        if (GastoRepresentacionMensual <= 0m) return 0m;
+
+        var periodsPerYear = GetPeriodsPerYear(PayPeriodType);
+        return periodsPerYear > 0
+            ? Math.Round(GastoRepresentacionMensual * 12m / periodsPerYear, 2)
+            : GastoRepresentacionMensual;
     }
 
     /// <summary>

@@ -8,6 +8,8 @@ import { LinkUserModal } from '../components/empleados/LinkUserModal';
 import { DeleteEmployeeModal } from '../components/empleados/DeleteEmployeeModal';
 import { formatBalboas } from '../utils/currency';
 import { PAY_PERIOD_CONFIG, CSS_RISK_OPTIONS } from '../constants/payroll';
+import { Link } from 'react-router-dom';
+import SalariosHistoricosEmpleado from '../components/empleados/SalariosHistoricosEmpleado';
 
 const EmpleadosPage = () => {
     // Auth context for permissions
@@ -43,6 +45,7 @@ const EmpleadosPage = () => {
         numeroIdentificacion: '',
         email: '',
         salarioBase: '',
+        gastoRepresentacionMensual: '',
         fechaContratacion: '',
         departamentoId: '',
         posicionId: '',
@@ -153,6 +156,7 @@ const EmpleadosPage = () => {
                 nombre: formData.nombre,
                 apellido: formData.apellido,
                 salarioBase: parseFloat(formData.salarioBase),
+                gastoRepresentacionMensual: parseFloat(formData.gastoRepresentacionMensual) || 0,
                 departamentoId: formData.departamentoId ? parseInt(formData.departamentoId) : null,
                 posicionId: formData.posicionId ? parseInt(formData.posicionId) : null,
                 payPeriodType: parseInt(formData.payPeriodType),
@@ -178,8 +182,10 @@ const EmpleadosPage = () => {
                 payload.email = formData.email || null;
 
             if (editingId) {
-                await api.put(`/api/empleados/${editingId}`, payload);
-                toast.success('Empleado actualizado exitosamente');
+                const r = await api.put(`/api/empleados/${editingId}`, payload);
+                // Si la empresa exige confirmación, el salario nuevo queda pendiente.
+                if (r?.cambioPendiente) toast.success(r.message, { duration: 6000 });
+                else toast.success('Empleado actualizado exitosamente');
             } else {
                 await api.post('/api/empleados', payload);
                 toast.success('Empleado creado exitosamente');
@@ -220,6 +226,7 @@ const EmpleadosPage = () => {
             numeroIdentificacion: empleado.numeroIdentificacion,
             email: empleado.usuarioVinculadoEmail ?? empleado.email ?? '',
             salarioBase: empleado.salarioBase.toString(),
+            gastoRepresentacionMensual: (empleado.gastoRepresentacionMensual ?? 0).toString(),
             fechaContratacion: empleado.fechaContratacion
                 ? toDateInputValue(empleado.fechaContratacion)
                 : '',
@@ -357,6 +364,7 @@ const EmpleadosPage = () => {
             numeroIdentificacion: '',
             email: '',
             salarioBase: '',
+            gastoRepresentacionMensual: '',
             fechaContratacion: '',
             departamentoId: '',
             posicionId: '',
@@ -415,6 +423,7 @@ const EmpleadosPage = () => {
                 {/* Fila superior: botón + stats */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     {canWrite() && (
+                        <div className="flex items-center gap-2">
                         <button
                             onClick={openNewModal}
                             className="inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2.5 rounded-lg font-medium transition-colors shadow-lg shadow-black/20"
@@ -424,32 +433,39 @@ const EmpleadosPage = () => {
                             </svg>
                             Agregar Empleado
                         </button>
+                        <Link
+                            to="/empleados/importar"
+                            className="inline-flex items-center gap-2 bg-navy-800 hover:bg-navy-700 border border-navy-600 text-gray-200 px-4 py-2.5 rounded-lg font-medium transition-colors"
+                        >
+                            Importar desde Excel
+                        </Link>
+                        </div>
                     )}
 
                     {/* Stats bar compacta */}
                     <div className="flex items-center gap-3 flex-wrap">
                         <div className="flex items-center gap-2 px-3 py-1.5 bg-navy-800 border border-navy-700 rounded-lg">
+                            <div className="w-2 h-2 rounded-full bg-gray-500" />
+                            <span className="text-sm text-gray-300 font-medium">
+                                {empleados.length} <span className="text-gray-400 font-normal">registrados</span>
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2 px-3 py-1.5 bg-navy-800 border border-navy-700 rounded-lg">
                             <div className="w-2 h-2 rounded-full bg-primary-400" />
                             <span className="text-sm text-gray-300 font-medium">
-                                {empleados.length} <span className="text-gray-500 font-normal">registrados</span>
+                                {activeEmpleados.length} <span className="text-gray-400 font-normal">activos</span>
                             </span>
                         </div>
                         <div className="flex items-center gap-2 px-3 py-1.5 bg-navy-800 border border-navy-700 rounded-lg">
-                            <div className="w-2 h-2 rounded-full bg-green-400" />
+                            <div className="w-2 h-2 rounded-full bg-gray-500" />
                             <span className="text-sm text-gray-300 font-medium">
-                                {activeEmpleados.length} <span className="text-gray-500 font-normal">activos</span>
+                                {empleados.filter(e => !e.estaActivo && !e.isDeleted).length} <span className="text-gray-400 font-normal">inactivos</span>
                             </span>
                         </div>
                         <div className="flex items-center gap-2 px-3 py-1.5 bg-navy-800 border border-navy-700 rounded-lg">
-                            <div className="w-2 h-2 rounded-full bg-red-400" />
-                            <span className="text-sm text-gray-300 font-medium">
-                                {empleados.filter(e => !e.estaActivo && !e.isDeleted).length} <span className="text-gray-500 font-normal">inactivos</span>
-                            </span>
-                        </div>
-                        <div className="flex items-center gap-2 px-3 py-1.5 bg-navy-800 border border-navy-700 rounded-lg">
-                            <div className="w-2 h-2 rounded-full bg-purple-400" />
-                            <span className="text-sm font-mono text-gray-300 font-medium">
-                                {formatBalboas(totalNomina)} <span className="text-gray-500 font-normal font-sans">nómina est.</span>
+                            <div className="w-2 h-2 rounded-full bg-gray-500" />
+                            <span className="text-sm font-mono text-gray-100 font-medium">
+                                {formatBalboas(totalNomina)} <span className="text-gray-400 font-normal font-sans">nómina est.</span>
                             </span>
                         </div>
                     </div>
@@ -568,14 +584,14 @@ const EmpleadosPage = () => {
                                         {(() => {
                                             // Usar hourlyRate del backend si está disponible y > 0
                                             if (empleado.hourlyRate && empleado.hourlyRate > 0) {
-                                                return `B/. ${Number(empleado.hourlyRate).toLocaleString('es-PA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                                                return `B/. ${Number(empleado.hourlyRate).toLocaleString('es-PA', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
                                             }
                                             // Fallback: calcular usando la fórmula mensual
                                             const hoursPerWeek = empleado.hoursPerWeek || 48;
                                             const weeksPerMonth = 52 / 12; // 4.3333...
                                             const hoursPerMonth = hoursPerWeek * weeksPerMonth;
                                             const rate = hoursPerMonth > 0 ? empleado.salarioBase / hoursPerMonth : 0;
-                                            return `B/. ${Number(rate).toLocaleString('es-PA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                                            return `B/. ${Number(rate).toLocaleString('es-PA', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
                                         })()}
                                     </td>
                                     <td className="py-3 px-4 text-sm text-gray-500">
@@ -862,6 +878,35 @@ const EmpleadosPage = () => {
                                     </p>
                                 </div>
 
+                                <div>
+                                    <label htmlFor="gasto-representacion" className="block text-sm font-medium text-gray-300 mb-2">
+                                        Gasto de Representación (Mensual)
+                                    </label>
+                                    <div className="relative">
+                                        <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 text-sm font-medium">B/.</span>
+                                        <input
+                                            id="gasto-representacion"
+                                            type="number"
+                                            step="0.01"
+                                            min="0"
+                                            value={formData.gastoRepresentacionMensual}
+                                            onChange={(e) => setFormData({ ...formData, gastoRepresentacionMensual: e.target.value })}
+                                            className="w-full pl-10 pr-3 py-2 border border-navy-600 bg-navy-800 text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                                            placeholder="0.00"
+                                        />
+                                    </div>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        Cotiza al Seguro Social como salario, pero la renta lo grava aparte
+                                        (10% hasta B/. 25,000 al año y 15% sobre el excedente). No puede superar el salario.
+                                    </p>
+                                    {formData.gastoRepresentacionMensual && formData.salarioBase &&
+                                     parseFloat(formData.gastoRepresentacionMensual) > parseFloat(formData.salarioBase) && (
+                                        <p className="text-xs text-amber-400 mt-1">
+                                            Por ley no puede ser mayor que el salario del empleado.
+                                        </p>
+                                    )}
+                                </div>
+
                                 {/* Fecha de Contratación - visible tanto en creación como en edición */}
                                 <div>
                                     <label className="block text-sm font-medium text-gray-300 mb-2">
@@ -923,6 +968,13 @@ const EmpleadosPage = () => {
                                                 </ul>
                                             )}
                                         </div>
+                                    </div>
+                                )}
+
+                                {/* Salarios devengados por mes (solo en edición) */}
+                                {editingId && (
+                                    <div className="md:col-span-2">
+                                        <SalariosHistoricosEmpleado empleadoId={editingId} />
                                     </div>
                                 )}
 

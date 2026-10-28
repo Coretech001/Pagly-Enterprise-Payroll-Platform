@@ -54,6 +54,13 @@ public class PayrollCalculationOrchestratorPortable
     /// a mitad de año, evita anualizar su salario como si lo hubiera cobrado desde enero.
     /// </param>
     /// <param name="earnedSoFarThisYear">Lo realmente devengado en el año antes de este período.</param>
+=======
+    /// <param name="incomeTaxOverride">
+    /// ISR ya calculado por el motor acumulativo. Cuando viene, se usa tal cual y no se
+    /// recalcula: el método acumulativo necesita el acumulado del año del empleado, que
+    /// vive en base de datos y este orquestador no conoce. Sin valor se cae al cálculo
+    /// por proyección simple del período, que es lo que usa el simulador.
+    /// </param>
     /// <returns>Resultado completo del cálculo de planilla</returns>
     public async Task<PayrollCalculationResult> CalculateEmployeePayrollAsync(
         int companyId,
@@ -70,6 +77,7 @@ public class PayrollCalculationOrchestratorPortable
         decimal? variablePay = null,
         decimal? remainingPeriodsInYear = null,
         decimal earnedSoFarThisYear = 0m)
+        decimal? incomeTaxOverride = null)
     {
         // ====================================================================
         // 1. Calcular CSS completo (empleado + empleador + riesgo profesional)
@@ -119,8 +127,26 @@ public class PayrollCalculationOrchestratorPortable
             remainingPeriodsInYear,
             earnedSoFarThisYear
         );
+=======
+        decimal incomeTax;
+        if (incomeTaxOverride.HasValue)
+        {
+            incomeTax = isSubjectToIncomeTax ? incomeTaxOverride.Value : 0m;
+        }
+        else
+        {
+            var isrResult = await _incomeTaxService.CalculateIncomeTaxAsync(
+                companyId,
+                grossPay,
+                payFrequency,
+                dependents,
+                isSubjectToIncomeTax,
+                isSubjectToEducationalInsurance,
+                calculationDate
+            );
 
-        decimal incomeTax = isrResult.TaxAmount;
+            incomeTax = isrResult.TaxAmount;
+        }
 
         // ====================================================================
         // 4. Calcular totales del empleado

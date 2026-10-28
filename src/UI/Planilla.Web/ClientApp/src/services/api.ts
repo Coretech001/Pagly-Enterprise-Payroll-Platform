@@ -225,14 +225,48 @@ export const api = {
     return handleResponse<T>(response, { url, method: 'PATCH', headers, body });
   },
 
-  async delete<T>(endpoint: string): Promise<T> {
+  // Algunos borrados exigen confirmación en el cuerpo (p. ej. el número de la
+  // partida de décimo, que se borra de forma permanente).
+  async delete<T>(endpoint: string, body?: any): Promise<T> {
     const url = `${API_BASE_URL}${endpoint}`;
     const headers = getHeaders();
     const response = await fetch(url, {
       method: 'DELETE',
       headers,
+      body: body ? JSON.stringify(body) : undefined,
     });
-    return handleResponse<T>(response, { url, method: 'DELETE', headers });
+    return handleResponse<T>(response, { url, method: 'DELETE', headers, body });
+  },
+
+  /**
+   * Sube un archivo como multipart/form-data. No fija Content-Type: el navegador
+   * lo pone con el boundary. Reporta el progreso real del envío con XHR, porque
+   * fetch no expone el progreso de subida.
+   */
+  async upload<T>(endpoint: string, file: File, fieldName = 'archivo', onProgress?: (pct: number) => void, extra?: Record<string, string>): Promise<T> {
+    const url = `${API_BASE_URL}${endpoint}`;
+    const token = localStorage.getItem('auth_token');
+    const form = new FormData();
+    form.append(fieldName, file, file.name);
+    // Campos de texto que viajan junto al archivo (por ejemplo, asociaciones en JSON).
+    for (const [k, v] of Object.entries(extra ?? {})) form.append(k, v);
+
+    return new Promise<T>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => {
+        let data: any = null;
+        try { data = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch { data = null; }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+        else reject(new ApiException(xhr.status, data?.message || `Error ${xhr.status}`, data?.code, data));
+      };
+      xhr.onerror = () => reject(new ApiException(0, 'No se pudo conectar con el servidor'));
+      xhr.send(form);
+    });
   },
 
   async download(endpoint: string, filename: string): Promise<void> {

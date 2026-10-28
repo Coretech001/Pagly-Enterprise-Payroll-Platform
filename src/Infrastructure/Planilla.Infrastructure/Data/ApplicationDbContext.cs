@@ -45,6 +45,23 @@ public class ApplicationDbContext : IdentityDbContext<AppUser>
     // Phase A: Configuraci�n de planilla (tasas CSS, SE, ISR)
     public DbSet<PayrollTaxConfiguration> PayrollTaxConfigurations { get; set; }
     public DbSet<OvertimeFactorConfiguration> OvertimeFactorConfigurations { get; set; }
+    public DbSet<AcumuladoFiscalEmpleado> AcumuladosFiscalesEmpleados { get; set; }
+    public DbSet<DevengadoMensual> DevengadosMensuales { get; set; }
+
+    // Revisiones entre el equipo y avisos de la campana
+    public DbSet<SolicitudRevision> SolicitudesRevision { get; set; }
+    public DbSet<Aviso> Avisos { get; set; }
+
+    // Licencias de maternidad (sin salario en planilla; la CSS paga el subsidio)
+    public DbSet<LicenciaMaternidad> LicenciasMaternidad { get; set; }
+
+    // Reloj de asistencia: marcaciones y horarios contra los que se comparan
+    public DbSet<Marcacion> Marcaciones { get; set; }
+    public DbSet<HorarioLaboral> HorariosLaborales { get; set; }
+    public DbSet<DispositivoReloj> DispositivosReloj { get; set; }
+
+    // Cambios de salario y bajas que esperan la confirmación de otra persona
+    public DbSet<CambioPendiente> CambiosPendientes { get; set; }
     public DbSet<TaxBracket> TaxBrackets { get; set; }
 
     // Phase D: Workflow de planilla
@@ -123,6 +140,17 @@ public class ApplicationDbContext : IdentityDbContext<AppUser>
             entity.HasIndex(e => e.TenantId)
                 .HasDatabaseName("IX_Empleado_TenantId");
 
+            // Un número del reloj pertenece a una sola persona de la empresa.
+            entity.HasIndex(e => new { e.TenantId, e.CodigoReloj })
+                .IsUnique()
+                .HasFilter("\"CodigoReloj\" IS NOT NULL")
+                .HasDatabaseName("IX_Empleado_Tenant_CodigoReloj");
+
+            entity.HasOne(e => e.HorarioLaboral)
+                .WithMany()
+                .HasForeignKey(e => e.HorarioLaboralId)
+                .OnDelete(DeleteBehavior.SetNull);
+
             // Índice compuesto para búsquedas por tenant y estado activo
             entity.HasIndex(e => new { e.TenantId, e.EstaActivo })
                 .HasDatabaseName("IX_Empleado_TenantId_EstaActivo");
@@ -168,6 +196,126 @@ public class ApplicationDbContext : IdentityDbContext<AppUser>
         });
 
         // Phase A: Configuraci�n de PayrollTaxConfiguration
+        modelBuilder.Entity<SolicitudRevision>(entity =>
+        {
+            entity.HasIndex(r => new { r.TenantId, r.Tipo, r.EntidadId })
+                .HasDatabaseName("IX_SolicitudRevision_Tenant_Tipo_Entidad");
+            entity.HasIndex(r => new { r.TenantId, r.RevisorId, r.Estado })
+                .HasDatabaseName("IX_SolicitudRevision_Tenant_Revisor_Estado");
+            entity.Property(r => r.Referencia).HasMaxLength(200);
+            entity.Property(r => r.Enlace).HasMaxLength(300);
+            entity.Property(r => r.SolicitadoPor).HasMaxLength(450);
+            entity.Property(r => r.RevisorId).HasMaxLength(450);
+            entity.Property(r => r.Comentario).HasMaxLength(1000);
+            entity.Property(r => r.Respuesta).HasMaxLength(1000);
+        });
+
+        modelBuilder.Entity<Marcacion>(entity =>
+        {
+            // Re-importar el mismo archivo no duplica marcaciones.
+            entity.HasIndex(m => new { m.TenantId, m.CodigoReloj, m.FechaHora })
+                .IsUnique()
+                .HasDatabaseName("IX_Marcacion_Tenant_Codigo_FechaHora");
+            entity.HasIndex(m => new { m.TenantId, m.EmpleadoId, m.FechaHora })
+                .HasDatabaseName("IX_Marcacion_Tenant_Empleado_FechaHora");
+            entity.Property(m => m.CodigoReloj).HasMaxLength(30);
+            entity.Property(m => m.Origen).HasMaxLength(20);
+            entity.Property(m => m.Fuente).HasMaxLength(200);
+            entity.HasOne(m => m.Empleado)
+                .WithMany()
+                .HasForeignKey(m => m.EmpleadoId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<CambioPendiente>(entity =>
+        {
+            entity.HasIndex(c => new { c.TenantId, c.Estado, c.CreatedAt })
+                .HasDatabaseName("IX_CambioPendiente_Tenant_Estado_Fecha");
+            entity.Property(c => c.Tipo).HasMaxLength(20);
+            entity.Property(c => c.Estado).HasMaxLength(20);
+            entity.Property(c => c.SolicitadoPor).HasMaxLength(450);
+            entity.Property(c => c.ResueltoPor).HasMaxLength(450);
+            entity.Property(c => c.AfectadoUserId).HasMaxLength(450);
+            entity.Property(c => c.Comentario).HasMaxLength(500);
+            entity.Property(c => c.SalarioAnterior).HasPrecision(18, 2);
+            entity.Property(c => c.SalarioNuevo).HasPrecision(18, 2);
+            entity.HasOne(c => c.Empleado)
+                .WithMany()
+                .HasForeignKey(c => c.EmpleadoId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<DispositivoReloj>(entity =>
+        {
+            // El reloj se identifica solo por su número de serie: uno por reloj en todo Pagly.
+            entity.HasIndex(d => d.NumeroSerie)
+                .IsUnique()
+                .HasDatabaseName("IX_DispositivoReloj_NumeroSerie");
+            entity.Property(d => d.NumeroSerie).HasMaxLength(50);
+            entity.Property(d => d.Nombre).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<HorarioLaboral>(entity =>
+        {
+            entity.HasIndex(h => h.TenantId).HasDatabaseName("IX_HorarioLaboral_Tenant");
+            entity.Property(h => h.Nombre).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<LicenciaMaternidad>(entity =>
+        {
+            entity.HasIndex(l => new { l.TenantId, l.EmpleadoId, l.FechaInicio })
+                .HasDatabaseName("IX_LicenciaMaternidad_Tenant_Empleado_Inicio");
+            entity.Property(l => l.Observaciones).HasMaxLength(500);
+            entity.Property(l => l.MotivoAnulacion).HasMaxLength(500);
+            entity.Property(l => l.CreadaPor).HasMaxLength(450);
+            entity.Property(l => l.AnuladaPor).HasMaxLength(450);
+            entity.HasOne(l => l.Empleado)
+                .WithMany()
+                .HasForeignKey(l => l.EmpleadoId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        modelBuilder.Entity<Aviso>(entity =>
+        {
+            entity.HasIndex(a => new { a.TenantId, a.UsuarioId, a.Leido, a.CreatedAt })
+                .HasDatabaseName("IX_Aviso_Tenant_Usuario_Leido_Fecha");
+            entity.Property(a => a.UsuarioId).HasMaxLength(450);
+            entity.Property(a => a.Titulo).HasMaxLength(200);
+            entity.Property(a => a.Mensaje).HasMaxLength(1000);
+            entity.Property(a => a.Enlace).HasMaxLength(300);
+        });
+
+        modelBuilder.Entity<DevengadoMensual>(entity =>
+        {
+            // Un solo registro por empleado y mes.
+            entity.HasIndex(d => new { d.TenantId, d.EmpleadoId, d.Anio, d.Mes })
+                .IsUnique()
+                .HasDatabaseName("IX_DevengadoMensual_Tenant_Empleado_Anio_Mes");
+
+            entity.HasOne(d => d.Empleado)
+                .WithMany()
+                .HasForeignKey(d => d.EmpleadoId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<AcumuladoFiscalEmpleado>(entity =>
+        {
+            // Un solo acumulado por empleado y año fiscal.
+            entity.HasIndex(a => new { a.TenantId, a.EmpleadoId, a.Anio })
+                .IsUnique()
+                .HasDatabaseName("IX_AcumuladoFiscalEmpleado_Tenant_Empleado_Anio");
+
+            entity.HasOne(a => a.Empleado)
+                .WithMany()
+                .HasForeignKey(a => a.EmpleadoId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Tenant)
+                .WithMany()
+                .HasForeignKey(a => a.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         modelBuilder.Entity<OvertimeFactorConfiguration>(entity =>
         {
             // Un solo factor por tipo de hora extra dentro de cada tenant
